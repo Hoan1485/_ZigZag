@@ -6,12 +6,13 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/irobot/create/protos/Create.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/devices/robotis/protos/RobotisLds01.proto"
 EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/appearances/protos/Parquetry.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/factory/containers/protos/WoodenBox.proto"
 
 WorldInfo {
 }
 Viewpoint {
-  orientation -0.5773502691896258 0.5773502691896258 0.5773502691896258 2.0944
-  position 0.0004925810859089462 2.2407400983989398e-06 13.93442810836789
+  orientation 0.5282664508903003 -0.4925246145001564 -0.6916314488043745 4.287060913622236
+  position 0.7302558877543309 -2.044146621342652 15.760780172590989
 }
 TexturedBackground {
 }
@@ -27,16 +28,8 @@ DEF ZigZag_VaCham RectangleArena {
   wallHeight 0.2
 }
 Create {
-  hidden position_0_0 11417.703286586722
-  hidden position_0_1 11403.818527666968
-  hidden rotation_10 0 1 0 0.185009370857421
-  hidden rotation_11 0 1 0 4.47504644585943
-  hidden translation_15 0.00022719558696726594 0.00013275661067080335 -0.0002965293777361447
-  hidden rotation_15 0.8442481925138057 -0.37897508215121795 -0.3789760896753904 1.7393140027336094
-  hidden translation_16 0.00015073490941430734 -4.8349987495921454e-05 -0.00030069031751200903
-  hidden rotation_16 -0.3025419858325793 0.6739659702053893 0.6739719710889969 -2.5540289981381576
-  translation 1 -1 0.05
-  rotation 0 0 0.9999999999999999 3.141592653589793
+  translation -1.2 -0.5 0.0408808
+  rotation -0.0005506569165109669 3.345749492726993e-06 0.9999998483828717 3.12397
   controller "vacuum_controller"
   bodySlot [
     Pen {
@@ -51,4 +44,19 @@ Create {
     InertialUnit {
     }
   ]
+}
+WoodenBox {
+  translation 0.91 0.15 0.3
+  name "1"
+  size 0.5 0.6 0.6
+}
+WoodenBox {
+  translation -1.22 2.2 0.3
+  name "2"
+  size 0.5 0.6 0.6
+}
+WoodenBox {
+  translation 0.3 -2.2 0.3
+  name "3"
+  size 0.5 0.6 0.6
 }
