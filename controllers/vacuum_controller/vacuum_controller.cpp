@@ -1,20 +1,7 @@
 // ============================================================
-// vacuum_controller_optimized.cpp
+// vacuum_controller.cpp
 // FSM Tích Hợp: Lập Bản Đồ Lưới + BFS + ZigZag
 // Phase 1: Tìm góc bằng thuật toán Quét Đa Hướng
-//
-// CHANGELOG (tối ưu so với bản gốc):
-//  [O1] Dùng std::fmod thay cho vòng while trong normAng()
-//  [O2] Gộp 2 mảng gridMap/hitMap thành 1 struct GridCell
-//  [O3] BFS dùng mảng visited stack-based, tránh copy vector path
-//       -> lưu parent array, truy vết ngược
-//  [O4] lidarAt() chuẩn hóa index bằng modulo, giữ nguyên
-//  [O5] updateMap() chỉ cập nhật khi img hợp lệ, kiểm tra bound 1 lần
-//  [O6] Odometry tính delta trực tiếp, tránh lưu 2 biến lastL/lastR riêng lẻ
-//  [O7] Tất cả biến trạng thái FSM gom vào struct RobotState
-//  [O8] Hàm diffDrive() tránh branch thừa bằng cách tính scale trực tiếp
-//  [O9] SCAN_360 thoát ngay sau 1 bước (stateless snapshot)
-//  [O10] Hằng số toán học tính sẵn (DEG2RAD)
 // ============================================================
 
 #include <webots/InertialUnit.hpp>
@@ -27,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <queue>
 #include <vector>
@@ -34,7 +22,7 @@
 using namespace webots;
 
 // ============================================================
-// HẰNG SỐ
+// HẰNG SỐ VẬT LÝ
 // ============================================================
 static constexpr double WHEEL_R = 0.031;
 static constexpr double WHEEL_L = 0.258;
@@ -60,8 +48,8 @@ static constexpr double KP_T = 5.5;
 // [O10] Tính sẵn hằng số chuyển đổi
 static constexpr double DEG2RAD = M_PI / 180.0;
 
-// Bản đồ lưới (phòng 5x5m, ô 0.4m)
-static constexpr double CELL_SIZE = 0.4;
+// Bản đồ lưới (phòng 5x5m, ô 0.m)
+static constexpr double CELL_SIZE = 0.2;
 static constexpr int GRID_W = 40;
 static constexpr int GRID_H = 40;
 static constexpr int OFFSET_X = 20;
@@ -80,31 +68,47 @@ static GridCell grid[GRID_H][GRID_W];
 // TRẠNG THÁI FSM
 // ============================================================
 enum State {
-  // Phase 1: Tìm góc
-  SCAN_360,
-  TURN_TO_WALL1,
-  APPROACH_WALL1,
-  BACKUP_1,
-  FIND_WALL2,
-  TURN_TO_WALL2,
-  APPROACH_WALL2,
-  BACKUP_2,
-  CORNER_ALIGN,
-  TURN_180_RECOVERY,
-  // Phase 2: ZigZag
-  FORWARD,
-  BACKUP,
-  TURN_1,
-  SHIFT,
-  TURN_2,
-  // Phase 3: BFS
-  CHECK_MAP,
-  NAV_TURN,
-  NAV_FORWARD,
-  NAV_BACKUP,
-  RESUME_ALIGN,
-  // Phase 4
-  DONE
+  // --- Phase 1: Khởi động và Tìm góc ban đầu ---
+  // Mục tiêu: Tìm và bám theo góc của 2 bức tường vuông góc để thiết lập hệ tọa
+  // độ và góc chuẩn ban đầu.
+  SCAN_360, // Xoay/Quét Lidar xung quanh để tìm chướng ngại vật (tường) gần
+            // nhất
+  TURN_TO_WALL1,  // Xoay robot hướng thẳng về phía tường 1
+  APPROACH_WALL1, // Tiến thẳng tới gần tường 1 cho đến khi đủ khoảng cách
+  BACKUP_1,       // Lùi lại một chút nếu lỡ va chạm khi đang tiến tới tường 1
+  FIND_WALL2, // Quét Lidar hai bên trái/phải để tìm tường thứ 2 vuông góc với
+              // tường 1
+  TURN_TO_WALL2,  // Xoay robot hướng thẳng về phía tường 2
+  APPROACH_WALL2, // Tiến thẳng tới gần tường 2 (góc phòng)
+  BACKUP_2,       // Lùi lại một chút nếu lỡ va chạm khi đang tiến tới tường 2
+  CORNER_ALIGN,   // Căn chỉnh góc quay cho chẵn (bội số của 90 độ) để chuẩn bị
+                  // lưới quét vuông vức
+  TURN_180_RECOVERY, // Xoay 180 độ quay lưng lại với góc phòng để chuẩn bị xuất
+                     // phát hàng đầu tiên
+
+  // --- Phase 2: Dọn dẹp theo đường ZigZag ---
+  // Mục tiêu: Di chuyển qua lại theo các đường thẳng song song để phủ kín diện
+  // tích phòng.
+  FORWARD, // Đi thẳng dọn dẹp theo dọc 1 hàng
+  BACKUP,  // Lùi lại nếu va chạm phải vật cản khi đang đi thẳng
+  TURN_1,  // Quay 90 độ lần 1 (bắt đầu chuyển sang hàng mới)
+  SHIFT,   // Đi ngang một đoạn ngắn tương đương bề rộng 1 hàng dọn dẹp
+  TURN_2,  // Quay 90 độ lần 2 (để robot song song với hàng cũ nhưng đi theo
+           // hướng ngược lại)
+
+  // --- Phase 3: Tìm đường (Navigation) bằng thuật toán BFS ---
+  // Mục tiêu: Tự động tính toán và di chuyển đến các khu vực chưa được dọn dẹp
+  // bị bỏ sót hoặc vướng vật cản.
+  CHECK_MAP, // Chạy thuật toán BFS trên bản đồ lưới để tìm đường tới ô chưa
+             // thăm (số 0) gần nhất
+  NAV_TURN,  // Xoay robot hướng về điểm (waypoint) tiếp theo trên đường dẫn BFS
+  NAV_FORWARD,  // Tiến thẳng tới điểm tiếp theo trên đường dẫn BFS
+  NAV_BACKUP,   // Lùi lại nếu gặp vật cản bất ngờ cản đường di chuyển BFS
+  RESUME_ALIGN, // Xoay căn chỉnh lại hướng đi cho đúng góc chuẩn ZigZag ban đầu
+                // sau khi tới đích BFS
+
+  // --- Phase 4: Hoàn thành ---
+  DONE // Dừng toàn bộ hoạt động của robot khi bản đồ không còn ô trống
 };
 
 struct Point2D {
@@ -112,43 +116,55 @@ struct Point2D {
 };
 
 // ============================================================
-// [O7] Gom biến trạng thái vào struct
+// [O7] Gom biến trạng thái vào struct để dễ dàng quản lý
 // ============================================================
 struct RobotState {
-  // Pose
-  double rx = 0, ry = 0;
-  double lastEncL = 0, lastEncR = 0;
+  // --- Thông tin Vị trí và Odometry (Đo lường quãng đường) ---
+  double rx = 0, ry = 0; // Tọa độ thực của robot (world-frame tính bằng mét)
+  double lastEncL = 0,
+         lastEncR =
+             0; // Giá trị encoder (góc quay) của 2 bánh xe ở bước trước đó
 
-  // Điều hướng chung
-  double target_yaw = 0;
-  double base_heading = 0;
-  double row_heading = 0;
-  double resume_heading = 0;
-  double last_yaw = 0;
-  bool first_step = true;
+  // --- Thông tin Điều hướng chung ---
+  double target_yaw = 0; // Góc quay mục tiêu mà robot đang muốn xoay tới
+  double base_heading =
+      0; // Góc hướng chuẩn ban đầu của hệ thống lưới (lấy sau Phase 1)
+  double row_heading = 0; // Góc hướng di chuyển của hàng ZigZag hiện tại
+  double resume_heading =
+      0; // Hướng cần phục hồi lại sau khi robot hoàn thành chạy BFS
+  double last_yaw =
+      0; // Góc quay thực tế ở bước trước đó (dùng để tính vận tốc góc)
+  bool first_step = true; // Cờ kiểm tra vòng lặp đầu tiên để thiết lập last_yaw
 
-  // Phase 1
-  double wall1_yaw = 0;
-  int wall2_dir = 1;
+  // --- Biến lưu trữ riêng cho Phase 1 (Tìm góc) ---
+  double wall1_yaw = 0; // Hướng của bức tường đầu tiên tìm được
+  int wall2_dir = 1; // Hướng xoay để tìm tường 2 (+1: xoay trái, -1: xoay phải)
 
-  // Phase 2/3
-  double shift_start_x = 0, shift_start_y = 0;
-  int turn_dir = 1;
-  bool shift_blocked = false;
-  int saved_gc = 0, saved_gr = 0;
+  // --- Biến lưu trữ riêng cho Phase 2 (ZigZag) và 3 (BFS) ---
+  double shift_start_x = 0,
+         shift_start_y =
+             0;     // Tọa độ lưu lại tại thời điểm bắt đầu chuyển hàng (SHIFT)
+  int turn_dir = 1; // Hướng bẻ lái chuyển hàng ZigZag (luân phiên 1 và -1)
+  bool shift_blocked = false; // Cờ xác định xem quá trình chuyển hàng có bị kẹt
+                              // bởi vật cản không
+  int saved_gc = 0, saved_gr = 0; // Lưu lại chỉ số dòng/cột trên lưới (Grid)
+                                  // hiện tại trước khi gọi BFS
 
-  // BFS path
-  std::vector<Point2D> nav_path;
-  size_t path_idx = 0;
-  bool is_recovery =
-      false; // Cờ theo dõi: Đã tiến vào quá trình phục hồi các phần còn sót
+  // --- Biến quản lý đường đi thuật toán BFS (Tìm đường) ---
+  std::vector<Point2D> nav_path; // Danh sách tọa độ các điểm trên lưới robot
+                                 // cần đi qua để đến đích
+  size_t path_idx =
+      0; // Chỉ số của điểm mục tiêu (waypoint) tiếp theo trong mảng nav_path
+  bool is_recovery = false; // Cờ trạng thái: Robot đã tiến vào quá trình tự
+                            // phục hồi quét các vùng sót
 };
 
 // ============================================================
 // TIỆN ÍCH
 // ============================================================
 
-// [O1] normAng dùng fmod thay cho while-loop
+// [O1] Hàm chuẩn hóa góc xoay: Đảm bảo góc luôn nằm trong đoạn [-PI, PI].
+// Tránh việc góc quay bị cộng dồn lên quá lớn sau nhiều vòng quay của robot.
 static inline double normAng(double a) {
   a = std::fmod(a + M_PI, 2.0 * M_PI);
   if (a < 0)
@@ -156,7 +172,9 @@ static inline double normAng(double a) {
   return a - M_PI;
 }
 
-// [O8] diffDrive không có branch thừa
+// [O8] Hàm điều khiển động cơ truyền động vi sai (Differential Drive).
+// Nhận vào vận tốc tới (v) và vận tốc góc (omega) để quy đổi ra vận tốc cho
+// từng bánh xe trái (vL), phải (vR).
 static void diffDrive(double v, double omega, Motor *mL, Motor *mR) {
   double vL = (v - omega * WHEEL_L * 0.5) / WHEEL_R;
   double vR = (v + omega * WHEEL_L * 0.5) / WHEEL_R;
@@ -166,12 +184,36 @@ static void diffDrive(double v, double omega, Motor *mL, Motor *mR) {
   mR->setVelocity(vR * scale);
 }
 
+// Hàm lấy khoảng cách đo được từ Lidar tại một góc độ cụ thể (deg).
+// Tính toán chỉ số mảng (0-359) và lọc nhiễu: nếu giá trị quá nhỏ, vô hạn (inf)
+// hoặc lỗi (NaN), trả về 9.9f (coi như không có vật cản).
 static inline float lidarAt(const float *img, int deg) {
   int idx = ((deg % 360) + 360) % 360;
   float d = img[idx];
   return (d < 0.01f || std::isinf(d) || std::isnan(d)) ? 9.9f : d;
 }
 
+// [FIX] Hàm lấy khoảng cách vật cản nằm trực diện phía trước mũi robot.
+// Lấy trung bình cộng các tia Lidar trong phạm vi góc ±5° (từ -5° đến 5°) để
+// giảm tín hiệu nhiễu, giúp robot nhận biết chính xác khi chuẩn bị đâm vào
+// tường.
+static float lidarFront(const float *img) {
+  float sum = 0;
+  int cnt = 0;
+  for (int offset = -5; offset <= 5; offset++) {
+    int idx = ((offset) % 360 + 360) % 360;
+    float v = img[idx];
+    if (v > 0.01f && !std::isinf(v) && !std::isnan(v)) {
+      sum += v;
+      cnt++;
+    }
+  }
+  return (cnt > 0) ? sum / cnt : 9.9f;
+}
+
+// Hàm tính giá trị khoảng cách trung bình từ Lidar trong một khoảng góc từ
+// deg_start tới deg_end. Thường dùng trong việc quét tìm các bức tường bên hông
+// trái/phải để so sánh khoảng cách.
 static float lidarAvg(const float *img, int deg_start, int deg_end) {
   float sum = 0;
   int cnt = 0;
@@ -185,48 +227,94 @@ static float lidarAvg(const float *img, int deg_start, int deg_end) {
   return (cnt > 0) ? sum / cnt : 9.9f;
 }
 
+// Chuyển đổi từ Tọa độ thực (x, y tính bằng mét) sang Tọa độ ô lưới (c: cột, r:
+// dòng) Dùng để xác định vị trí của robot hoặc điểm cần đánh dấu trên mảng 2
+// chiều map.
 static void worldToGrid(double x, double y, int &c, int &r) {
   c = (int)std::floor(x / CELL_SIZE) + OFFSET_X;
   r = (int)std::floor(y / CELL_SIZE) + OFFSET_Y;
 }
 
+// Chuyển đổi ngược lại từ Tọa độ ô lưới (c, r) ra Tọa độ thực tâm ô (x, y tính
+// bằng mét) Dùng khi BFS tìm được đích (là 1 ô) và cần trả tọa độ thực về cho
+// bộ điều khiển di chuyển tới.
 static void gridToWorld(int c, int r, double &x, double &y) {
   x = (c - OFFSET_X) * CELL_SIZE + (CELL_SIZE * 0.5);
   y = (r - OFFSET_Y) * CELL_SIZE + (CELL_SIZE * 0.5);
 }
 
-// [O5] updateMap: kiểm tra hợp lệ trước, gom bound-check
+// [O5-FIX] Hàm Cập nhật Bản đồ Lưới (Grid Map) dựa trên dữ liệu Lidar
+// Mục tiêu: Ghi nhận vị trí các bức tường (vật cản) vào ma trận lưới.
+// Để tối ưu bộ nhớ và thời gian, robot chỉ lấy mẫu cảm biến ở 3 hướng (Trước
+// mặt, Bên trái, Bên phải) với khoảng cách cắt ngắn (0.5m). Tránh được tình
+// trạng nhận nhầm khoảng cách xa hoặc nhiễu.
 static void updateMap(const float *img, double rx, double ry, double ryaw,
                       double w_vel) {
-  if (!img || std::abs(w_vel) > 1.0)
-    return;
-  for (int i = 0; i < 360; i += 5) {
-    float r = img[i];
-    if (r <= 0.05f || r >= 2.0f)
+  if (!img || std::abs(w_vel) > 0.5)
+    return; // Bỏ qua cập nhật map khi Lidar chưa sẵn sàng hoặc robot đang xoay
+            // quá nhanh (dễ gây méo bản đồ)
+
+  // 3 hướng tương đối với mũi robot (chỉ số tia Lidar): Trước (0°), Trái (90°),
+  // Phải (270°)
+  static const int robot_dirs[3] = {0, 90, 270};
+
+  for (int d = 0; d < 3; d++) {
+    int lidar_idx = robot_dirs[d];
+
+    // Lấy khoảng cách tia trung bình ±3° quanh hướng đó để giảm nhiễu
+    float sum = 0;
+    int cnt = 0;
+    for (int offset = -3; offset <= 3; offset++) {
+      int idx = ((lidar_idx + offset) % 360 + 360) % 360;
+      float v = img[idx];
+      // Chỉ phát hiện vật cản trong phạm vi 0.50m
+      if (v > 0.05f && v <= 0.50f && !std::isinf(v) && !std::isnan(v)) {
+        sum += v;
+        cnt++;
+      }
+    }
+    if (cnt == 0)
       continue;
-    double th = normAng(ryaw - i * DEG2RAD);
+    float r = sum / cnt;
+
+    // Tính góc world-frame của tia này
+    double world_ang = normAng(ryaw - lidar_idx * DEG2RAD);
+
+    // Chiếu điểm obstacle
     int gc, gr;
-    worldToGrid(rx + r * std::cos(th), ry + r * std::sin(th), gc, gr);
+    worldToGrid(rx + r * std::cos(world_ang), ry + r * std::sin(world_ang), gc,
+                gr);
     if ((unsigned)gc >= (unsigned)GRID_W || (unsigned)gr >= (unsigned)GRID_H)
       continue;
+
     GridCell &cell = grid[gr][gc];
-    if (cell.status == 2)
-      continue; // đã xác nhận, không cần cập nhật
-    int weight = (r < 1.0f) ? 3 : 1;
+
+    // Tránh ghi đè lên ô đã đi qua hoặc đã đánh dấu
+    if (cell.status == 1 || cell.status == 2)
+      continue;
+
+    // Tăng hit nhanh hơn vì chỉ có 3 tia
+    int weight = 4;
     cell.hits = (int8_t)std::min((int)cell.hits + weight, 100);
-    if (cell.hits > 5)
+    if (cell.hits >= 6)
       cell.status = 2;
   }
 }
 
 // ============================================================
-// [O3] BFS tối ưu: dùng mảng parent thay vì copy vector path
+// [O3] Thuật toán tìm đường BFS (Breadth-First Search)
+// Chức năng: Tìm đường đi ngắn nhất từ ô hiện tại (sc, sr) đến ô gần nhất chưa
+// được dọn dẹp (status = 0). Thuật toán quét lan ra xung quanh, tránh các ô vật
+// cản (status = 2) và đánh dấu đường đi bằng mảng 'parent'. Kết quả trả về là
+// một danh sách (vector) các điểm (Point2D) tạo thành đường dẫn để robot chạy
+// theo.
 // ============================================================
 std::vector<Point2D> findUnvisited(int sc, int sr) {
   if ((unsigned)sc >= (unsigned)GRID_W || (unsigned)sr >= (unsigned)GRID_H)
     return {};
 
-  // Mảng parent phẳng, -1 = chưa thăm
+  // Mảng parent 1 chiều (làm phẳng 2D thành 1D), dùng để lưu dấu vết ô trước
+  // đó. Giá trị -1 nghĩa là chưa thăm.
   static int parent[GRID_H * GRID_W];
   std::fill(parent, parent + GRID_H * GRID_W, -1);
 
@@ -273,7 +361,10 @@ std::vector<Point2D> findUnvisited(int sc, int sr) {
   return path;
 }
 
-// countZerosInDir: không thay đổi logic, chỉ dùng DEG2RAD được bỏ
+// Hàm đếm số lượng ô lưới chưa thăm (status = 0) dọc theo một hướng (heading)
+// xuất phát từ (gc, gr). Hàm này phục vụ cơ chế kiểm tra nhanh xem hướng đang
+// chạy (hàng ZigZag hiện tại) có còn khu vực nào trống cần dọn dẹp không. Nếu
+// trả về 0, robot có thể bỏ qua và tìm đường khác ngay lập tức.
 static int countZerosInDir(int gc, int gr, double heading) {
   int dx = (int)std::round(std::cos(heading));
   int dy = (int)std::round(std::sin(heading));
@@ -378,9 +469,20 @@ int main() {
           min_idx = i;
         }
       }
-      rs.wall1_yaw = normAng(yaw - min_idx * DEG2RAD);
-      rs.target_yaw = rs.wall1_yaw;
-      state = TURN_TO_WALL1;
+
+      // Nếu không nhận được tín hiệu lidar (tất cả đều ngoài phạm vi)
+      if (min_d >= 9.0f) {
+        if (bumped) {
+          cv = BACKUP_SPD;
+        } else {
+          cv = FWD_SPD;
+        }
+        co = 0.0;
+      } else {
+        rs.wall1_yaw = normAng(yaw - min_idx * DEG2RAD);
+        rs.target_yaw = rs.wall1_yaw;
+        state = TURN_TO_WALL1;
+      }
     } break;
 
     case TURN_TO_WALL1: {
@@ -391,7 +493,7 @@ int main() {
     } break;
 
     case APPROACH_WALL1: {
-      float front = lidarAt(img, 0);
+      float front = lidarFront(img);
       if (bumped)
         state = BACKUP_1;
       else if (front < WALL1_STOP)
@@ -424,7 +526,7 @@ int main() {
     } break;
 
     case APPROACH_WALL2: {
-      float front = lidarAt(img, 0);
+      float front = lidarFront(img);
       if (bumped)
         state = BACKUP_2;
       else if (front < WALL2_STOP)
@@ -473,7 +575,7 @@ int main() {
       co = KP_H * normAng(rs.row_heading - yaw);
       if (bumped) {
         state = BACKUP;
-      } else if (lidarAt(img, 0) < (float)OBSTACLE ||
+      } else if (lidarFront(img) < (float)OBSTACLE ||
                  (rs.is_recovery &&
                   countZerosInDir(gc, gr, rs.row_heading) == 0)) {
         // Tối ưu bám viền (Zigzag hẹp): Nếu đang ở phase phục hồi và phía trước
@@ -493,6 +595,12 @@ int main() {
 
         if (all_done) {
           state = DONE; // Hoàn thiện 100% bản đồ, tắt máy!
+        } else if (rs.is_recovery) {
+          // Fix: Trong BFS recovery, khi hết ô 0, dùng BFS tìm đường thay vì
+          // zigzag mù
+          rs.saved_gc = gc;
+          rs.saved_gr = gr;
+          state = CHECK_MAP;
         } else {
           rs.target_yaw = normAng(rs.row_heading + rs.turn_dir * M_PI * 0.5);
           rs.shift_blocked = false;
@@ -505,16 +613,22 @@ int main() {
       cv = BACKUP_SPD;
       co = KP_H * normAng(rs.row_heading - yaw);
       if (!bumped) {
-        rs.target_yaw = normAng(rs.row_heading + rs.turn_dir * M_PI * 0.5);
-        rs.shift_blocked = false;
-        state = TURN_1;
+        if (rs.is_recovery) {
+          rs.saved_gc = gc;
+          rs.saved_gr = gr;
+          state = CHECK_MAP;
+        } else {
+          rs.target_yaw = normAng(rs.row_heading + rs.turn_dir * M_PI * 0.5);
+          rs.shift_blocked = false;
+          state = TURN_1;
+        }
       }
       break;
 
     case TURN_1:
       co = KP_T * normAng(rs.target_yaw - yaw);
       if (std::abs(normAng(rs.target_yaw - yaw)) < TURN_THR) {
-        if (lidarAt(img, 0) < (float)OBSTACLE) {
+        if (lidarFront(img) < (float)OBSTACLE) {
           rs.shift_blocked = true;
           rs.resume_heading = rs.row_heading;
           rs.saved_gc = gc;
@@ -533,7 +647,7 @@ int main() {
       co = KP_H * normAng(rs.target_yaw - yaw);
       double dist =
           std::hypot(rs.rx - rs.shift_start_x, rs.ry - rs.shift_start_y);
-      bool blocked = lidarAt(img, 0) < (float)OBSTACLE || bumped;
+      bool blocked = lidarFront(img) < (float)OBSTACLE || bumped;
       if (blocked && dist < SHIFT_D * 0.5) {
         rs.shift_blocked = true;
         rs.resume_heading = rs.row_heading;
@@ -551,7 +665,7 @@ int main() {
       if (std::abs(normAng(rs.target_yaw - yaw)) < TURN_THR) {
         rs.row_heading = rs.target_yaw;
         rs.turn_dir *= -1;
-        if (lidarAt(img, 0) < (float)OBSTACLE) {
+        if (lidarFront(img) < (float)OBSTACLE) {
           rs.resume_heading = rs.row_heading;
           rs.saved_gc = gc;
           rs.saved_gr = gr;
@@ -594,34 +708,11 @@ int main() {
       cv = NAV_SPD;
       co = KP_H * normAng(ang - yaw);
 
-      if (bumped || lidarAt(img, 0) < (float)OBSTACLE) {
+      if (bumped || lidarFront(img) < (float)OBSTACLE) {
         state = NAV_BACKUP;
       } else if (std::hypot(tx - rs.rx, ty - rs.ry) < NAV_DIST_THR) {
         rs.path_idx++;
-        if (rs.path_idx >= rs.nav_path.size()) {
-          rs.is_recovery =
-              true; // Bật cờ đánh dấu bắt đầu phase dọn phần còn sót
-          // Chọn hướng sweep tốt nhất sau khi BFS hoàn thành
-          double best_heading = rs.base_heading;
-          int max_zeros = -1;
-          for (int i = 0; i < 4; i++) {
-            double h = rs.base_heading + i * M_PI * 0.5;
-            int z = countZerosInDir(gc, gr, h);
-            if (z > max_zeros) {
-              max_zeros = z;
-              best_heading = h;
-            }
-          }
-          rs.resume_heading = normAng(best_heading);
-          double lh = normAng(best_heading + M_PI * 0.5);
-          double rh = normAng(best_heading - M_PI * 0.5);
-          rs.turn_dir =
-              (countZerosInDir(gc, gr, lh) >= countZerosInDir(gc, gr, rh)) ? 1
-                                                                           : -1;
-          state = RESUME_ALIGN;
-        } else {
-          state = NAV_TURN;
-        }
+        state = NAV_TURN;
       }
     } break;
 
