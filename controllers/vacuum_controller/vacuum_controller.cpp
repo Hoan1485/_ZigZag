@@ -1,7 +1,12 @@
 // ============================================================
-// vacuum_controller.cpp
-// FSM Tích Hợp: Lập Bản Đồ Lưới + BFS + ZigZag
-// Phase 1: Tìm góc bằng thuật toán Quét Đa Hướng
+//  vacuum_controller.cpp
+//  Robot Hút Bụi Tự Động - Webots Simulation
+//
+//  Kiến trúc: FSM 4 pha
+//    Phase 1 – Tìm góc tường (QUET_360 → CAN_CHINH_GOC)
+//    Phase 2 – Quay 180° chuẩn bị quét  (QUAY_180)
+//    Phase 3 – Quét ZigZag              (TIEN … QUAY_2)
+//    Phase 4 – Điều hướng BFS + phục hồi (KIEM_TRA_BAN_DO … CAN_LAI_HUONG)
 // ============================================================
 
 #include <webots/InertialUnit.hpp>
@@ -20,755 +25,763 @@
 #include <vector>
 
 using namespace webots;
+using namespace std;
 
 // ============================================================
-// HẰNG SỐ VẬT LÝ
+//  HẰNG SỐ CẤU HÌNH
 // ============================================================
-static constexpr double WHEEL_R = 0.031;
-static constexpr double WHEEL_L = 0.258;
-static constexpr double MAX_WS = 6.28;
 
-static constexpr double APPROACH_SPD = 0.20;
-static constexpr double WALL2_SPD = 0.18;
-static constexpr double BACKUP_SPD = -0.10;
-static constexpr double FWD_SPD = 0.25;
-static constexpr double FOLLOW_SPD = 0.18;
-static constexpr double NAV_SPD = 0.30;
-static constexpr double SHIFT_D = 0.30;
-static constexpr double OBSTACLE = 0.20;
+// --- Thông số cơ học ---
+static constexpr double BANH_XE_BAN_KINH = 0.031; // [m]
+static constexpr double BANH_XE_KHOANG = 0.258;   // [m]  khoảng cách tâm 2 bánh
+static constexpr double MOTOR_TOC_DO_MAX = 6.28;  // [rad/s]
 
-static constexpr double WALL1_STOP = 0.15;
-static constexpr double WALL2_STOP = 0.15;
-static constexpr double TURN_THR = 0.012;
-static constexpr double NAV_DIST_THR = 0.08;
+// --- Tốc độ tịnh tiến theo từng pha ---
+static constexpr double V_TIEN_TUONG_1 = 0.20; // [m/s]  tiến đến tường thứ nhất
+static constexpr double V_TIEN_TUONG_2 = 0.18; // [m/s]  tiến đến tường thứ hai
+static constexpr double V_LUI = -0.10;         // [m/s]  lùi sau va chạm
+static constexpr double V_ZIGZAG = 0.25;       // [m/s]  quét zigzag
+static constexpr double V_DICH_HANG = 0.18;    // [m/s]  dịch sang hàng mới
+static constexpr double V_DIEU_HUONG = 0.30;   // [m/s]  di chuyển theo BFS
 
-static constexpr double KP_H = 4.5;
-static constexpr double KP_T = 5.5;
+// --- Ngưỡng không gian ---
+static constexpr double KHOANG_DICH_HANG = 0.30; // [m]  độ rộng mỗi dải quét
+static constexpr double NGUONG_VAT_CAN =
+    0.20; // [m]  khoảng cách phát hiện vật cản
+static constexpr double DUNG_TUONG_1 = 0.15;   // [m]  dừng cách tường 1
+static constexpr double DUNG_TUONG_2 = 0.15;   // [m]  dừng cách tường 2
+static constexpr double NGUONG_DEN_NOI = 0.08; // [m]  coi là đã đến điểm BFS
 
-// [O10] Tính sẵn hằng số chuyển đổi
-static constexpr double DEG2RAD = M_PI / 180.0;
+// --- Tham số bộ điều khiển ---
+static constexpr double KP_GIU_THANG = 4.5; // Hệ số P giữ thẳng hướng
+static constexpr double KP_QUAY = 5.5;      // Hệ số P điều khiển góc quay
+static constexpr double NGUONG_SAI_SO_GOC =
+    0.012; // [rad]  sai số góc chấp nhận được
 
-// Bản đồ lưới (phòng 5x5m, ô 0.m)
-static constexpr double CELL_SIZE = 0.2;
-static constexpr int GRID_W = 40;
-static constexpr int GRID_H = 40;
-static constexpr int OFFSET_X = 20;
-static constexpr int OFFSET_Y = 20;
+// --- Hệ số chuyển đổi ---
+static constexpr double DO_SANG_RAD = M_PI / 180.0;
 
-// ============================================================
-// [O2] Gộp gridMap + hitMap thành 1 struct GridCell
-// ============================================================
-struct GridCell {
-  int8_t status = 0; // 0=chưa thăm, 1=đã dọn, 2=vật cản
-  int8_t hits = 0;   // điểm tin cậy (cap 100)
-};
-static GridCell grid[GRID_H][GRID_W];
+// --- Thông số lưới bản đồ ---
+static constexpr double O_LUOI_KICH_THUOC = 0.20; // [m/ô]
+static constexpr int LUOI_SO_COT = 100;
+static constexpr int LUOI_SO_HANG = 100;
+static constexpr int LUOI_DICH_COT = 50;  // gốc tọa độ lưới (cột)
+static constexpr int LUOI_DICH_HANG = 50; // gốc tọa độ lưới (hàng)
 
 // ============================================================
-// TRẠNG THÁI FSM
+//  CẤU TRÚC DỮ LIỆU
 // ============================================================
-enum State {
-  // --- Phase 1: Khởi động và Tìm góc ban đầu ---
-  // Mục tiêu: Tìm và bám theo góc của 2 bức tường vuông góc để thiết lập hệ tọa
-  // độ và góc chuẩn ban đầu.
-  SCAN_360, // Xoay/Quét Lidar xung quanh để tìm chướng ngại vật (tường) gần
-            // nhất
-  TURN_TO_WALL1,  // Xoay robot hướng thẳng về phía tường 1
-  APPROACH_WALL1, // Tiến thẳng tới gần tường 1 cho đến khi đủ khoảng cách
-  BACKUP_1,       // Lùi lại một chút nếu lỡ va chạm khi đang tiến tới tường 1
-  FIND_WALL2, // Quét Lidar hai bên trái/phải để tìm tường thứ 2 vuông góc với
-              // tường 1
-  TURN_TO_WALL2,  // Xoay robot hướng thẳng về phía tường 2
-  APPROACH_WALL2, // Tiến thẳng tới gần tường 2 (góc phòng)
-  BACKUP_2,       // Lùi lại một chút nếu lỡ va chạm khi đang tiến tới tường 2
-  CORNER_ALIGN,   // Căn chỉnh góc quay cho chẵn (bội số của 90 độ) để chuẩn bị
-                  // lưới quét vuông vức
-  TURN_180_RECOVERY, // Xoay 180 độ quay lưng lại với góc phòng để chuẩn bị xuất
-                     // phát hàng đầu tiên
 
-  // --- Phase 2: Dọn dẹp theo đường ZigZag ---
-  // Mục tiêu: Di chuyển qua lại theo các đường thẳng song song để phủ kín diện
-  // tích phòng.
-  FORWARD, // Đi thẳng dọn dẹp theo dọc 1 hàng
-  BACKUP,  // Lùi lại nếu va chạm phải vật cản khi đang đi thẳng
-  TURN_1,  // Quay 90 độ lần 1 (bắt đầu chuyển sang hàng mới)
-  SHIFT,   // Đi ngang một đoạn ngắn tương đương bề rộng 1 hàng dọn dẹp
-  TURN_2,  // Quay 90 độ lần 2 (để robot song song với hàng cũ nhưng đi theo
-           // hướng ngược lại)
-
-  // --- Phase 3: Tìm đường (Navigation) bằng thuật toán BFS ---
-  // Mục tiêu: Tự động tính toán và di chuyển đến các khu vực chưa được dọn dẹp
-  // bị bỏ sót hoặc vướng vật cản.
-  CHECK_MAP, // Chạy thuật toán BFS trên bản đồ lưới để tìm đường tới ô chưa
-             // thăm (số 0) gần nhất
-  NAV_TURN,  // Xoay robot hướng về điểm (waypoint) tiếp theo trên đường dẫn BFS
-  NAV_FORWARD,  // Tiến thẳng tới điểm tiếp theo trên đường dẫn BFS
-  NAV_BACKUP,   // Lùi lại nếu gặp vật cản bất ngờ cản đường di chuyển BFS
-  RESUME_ALIGN, // Xoay căn chỉnh lại hướng đi cho đúng góc chuẩn ZigZag ban đầu
-                // sau khi tới đích BFS
-
-  // --- Phase 4: Hoàn thành ---
-  DONE // Dừng toàn bộ hoạt động của robot khi bản đồ không còn ô trống
+// Một ô trong lưới bản đồ
+struct OLuoi {
+  int8_t trang_thai = 0; // 0 = chưa thăm, 1 = đã thăm, 2 = vật cản
+  int8_t diem_tin = 0;   // điểm tích lũy để xác nhận vật cản
 };
 
-struct Point2D {
-  int c, r;
+// Bản đồ lưới toàn cục
+static OLuoi ban_do[LUOI_SO_HANG][LUOI_SO_COT];
+
+// Tọa độ một ô lưới (hệ số nguyên)
+struct DiemLuoi {
+  int cot, hang;
 };
 
-// ============================================================
-// [O7] Gom biến trạng thái vào struct để dễ dàng quản lý
-// ============================================================
-struct RobotState {
-  // --- Thông tin Vị trí và Odometry (Đo lường quãng đường) ---
-  double rx = 0, ry = 0; // Tọa độ thực của robot (world-frame tính bằng mét)
-  double lastEncL = 0,
-         lastEncR =
-             0; // Giá trị encoder (góc quay) của 2 bánh xe ở bước trước đó
+// Tất cả các trạng thái FSM
+enum TrangThai {
+  // Phase 1: Tìm góc tường
+  QUET_360,
+  QUAY_VE_TUONG_1,
+  TIEN_DEN_TUONG_1,
+  LUI_1,
+  TIM_TUONG_2,
+  QUAY_VE_TUONG_2,
+  TIEN_DEN_TUONG_2,
+  LUI_2,
+  CAN_CHINH_GOC,
 
-  // --- Thông tin Điều hướng chung ---
-  double target_yaw = 0; // Góc quay mục tiêu mà robot đang muốn xoay tới
-  double base_heading =
-      0; // Góc hướng chuẩn ban đầu của hệ thống lưới (lấy sau Phase 1)
-  double row_heading = 0; // Góc hướng di chuyển của hàng ZigZag hiện tại
-  double resume_heading =
-      0; // Hướng cần phục hồi lại sau khi robot hoàn thành chạy BFS
-  double last_yaw =
-      0; // Góc quay thực tế ở bước trước đó (dùng để tính vận tốc góc)
-  bool first_step = true; // Cờ kiểm tra vòng lặp đầu tiên để thiết lập last_yaw
+  // Phase 2: Chuẩn bị zigzag
+  QUAY_180,
 
-  // --- Biến lưu trữ riêng cho Phase 1 (Tìm góc) ---
-  double wall1_yaw = 0; // Hướng của bức tường đầu tiên tìm được
-  int wall2_dir = 1; // Hướng xoay để tìm tường 2 (+1: xoay trái, -1: xoay phải)
+  // Phase 3: Quét ZigZag
+  TIEN,
+  LUI,
+  QUAY_1,
+  DICH_HANG,
+  QUAY_2,
 
-  // --- Biến lưu trữ riêng cho Phase 2 (ZigZag) và 3 (BFS) ---
-  double shift_start_x = 0,
-         shift_start_y =
-             0;     // Tọa độ lưu lại tại thời điểm bắt đầu chuyển hàng (SHIFT)
-  int turn_dir = 1; // Hướng bẻ lái chuyển hàng ZigZag (luân phiên 1 và -1)
-  bool shift_blocked = false; // Cờ xác định xem quá trình chuyển hàng có bị kẹt
-                              // bởi vật cản không
-  int saved_gc = 0, saved_gr = 0; // Lưu lại chỉ số dòng/cột trên lưới (Grid)
-                                  // hiện tại trước khi gọi BFS
+  // Phase 4: Điều hướng BFS
+  KIEM_TRA_BAN_DO,
+  DH_QUAY,
+  DH_TIEN,
+  DH_LUI,
+  CAN_LAI_HUONG,
 
-  // --- Biến quản lý đường đi thuật toán BFS (Tìm đường) ---
-  std::vector<Point2D> nav_path; // Danh sách tọa độ các điểm trên lưới robot
-                                 // cần đi qua để đến đích
-  size_t path_idx =
-      0; // Chỉ số của điểm mục tiêu (waypoint) tiếp theo trong mảng nav_path
-  bool is_recovery = false; // Cờ trạng thái: Robot đã tiến vào quá trình tự
-                            // phục hồi quét các vùng sót
-  int nav_retry = 0;
-  int nav_turn_steps = 0;
+  HOAN_THANH
+};
+
+// Toàn bộ biến trạng thái của robot
+struct TrangThaiRobot {
+  // Odometry
+  double vi_tri_x = 0.0;
+  double vi_tri_y = 0.0;
+  double enc_trai_cu = 0.0;
+  double enc_phai_cu = 0.0;
+  double goc_truoc = 0.0;
+  bool buoc_dau = true; // true = chưa đọc encoder lần đầu
+
+  // Góc điều hướng
+  double goc_muc_tieu = 0.0;   // góc đích hiện tại khi quay
+  double huong_hang = 0.0;     // hướng chạy dọc của dải zigzag
+  double huong_goc = 0.0;      // hướng gốc ban đầu của zigzag
+  double huong_tiep_tuc = 0.0; // hướng sẽ tiếp tục sau BFS
+  double goc_tuong_1 = 0.0;    // hướng về phía tường đầu tiên
+
+  // Thông số Phase 1
+  int chieu_tuong_2 = 1; // +1 hoặc -1: chiều quay tìm tường 2
+
+  // Thông số zigzag
+  double dich_bat_dau_x = 0.0;
+  double dich_bat_dau_y = 0.0;
+  int chieu_queo = 1; // +1: rẽ trái, -1: rẽ phải
+  bool dich_bi_chan = false;
+
+  // BFS và phục hồi
+  int luu_cot = 0;
+  int luu_hang = 0;
+  vector<DiemLuoi> duong_di; // đường đi BFS đến ô chưa thăm
+  size_t chi_so = 0;
+  bool dang_phuc_hoi = false;
 };
 
 // ============================================================
-// TIỆN ÍCH
+//  HÀM TIỆN ÍCH
 // ============================================================
 
-// [O1] Hàm chuẩn hóa góc xoay: Đảm bảo góc luôn nằm trong đoạn [-PI, PI].
-// Tránh việc góc quay bị cộng dồn lên quá lớn sau nhiều vòng quay của robot.
-static inline double normAng(double a) {
-  a = std::fmod(a + M_PI, 2.0 * M_PI);
-  if (a < 0)
+/**
+ * Chuẩn hóa góc về khoảng (-π, π].
+ */
+static inline double chuan_hoa_goc(double a) {
+  a = fmod(a + M_PI, 2.0 * M_PI);
+  if (a < 0.0)
     a += 2.0 * M_PI;
   return a - M_PI;
 }
 
-// [O8] Hàm điều khiển động cơ truyền động vi sai (Differential Drive).
-// Nhận vào vận tốc tới (v) và vận tốc góc (omega) để quy đổi ra vận tốc cho
-// từng bánh xe trái (vL), phải (vR).
-static void diffDrive(double v, double omega, Motor *mL, Motor *mR) {
-  double vL = (v - omega * WHEEL_L * 0.5) / WHEEL_R;
-  double vR = (v + omega * WHEEL_L * 0.5) / WHEEL_R;
-  double s = std::max(std::abs(vL), std::abs(vR));
-  double scale = (s > MAX_WS) ? MAX_WS / s : 1.0;
-  mL->setVelocity(vL * scale);
-  mR->setVelocity(vR * scale);
+/**
+ * Điều khiển vi sai: từ vận tốc tịnh tiến (m/s) và vận tốc góc (rad/s)
+ * tính tốc độ góc từng bánh rồi gửi xuống motor.
+ * Tự động scale nếu vượt giới hạn MOTOR_TOC_DO_MAX.
+ */
+static void dieu_khien_vi_sai(double v_tien, double v_goc, Motor *dc_trai,
+                              Motor *dc_phai) {
+  // Công thức vi sai
+  double w_trai = (v_tien - v_goc * BANH_XE_KHOANG * 0.5) / BANH_XE_BAN_KINH;
+  double w_phai = (v_tien + v_goc * BANH_XE_KHOANG * 0.5) / BANH_XE_BAN_KINH;
+
+  // Scale nếu vượt giới hạn
+  double w_max = max(abs(w_trai), abs(w_phai));
+  double ty_le = (w_max > MOTOR_TOC_DO_MAX) ? MOTOR_TOC_DO_MAX / w_max : 1.0;
+
+  dc_trai->setVelocity(w_trai * ty_le);
+  dc_phai->setVelocity(w_phai * ty_le);
 }
 
-// Hàm lấy khoảng cách đo được từ Lidar tại một góc độ cụ thể (deg).
-// Tính toán chỉ số mảng (0-359) và lọc nhiễu: nếu giá trị quá nhỏ, vô hạn (inf)
-// hoặc lỗi (NaN), trả về 9.9f (coi như không có vật cản).
-static inline float lidarAt(const float *img, int deg) {
-  int idx = ((deg % 360) + 360) % 360;
-  float d = img[idx];
-  return (d < 0.01f || std::isinf(d) || std::isnan(d)) ? 9.9f : d;
+/**
+ * Lấy giá trị LiDAR tại góc [goc] độ (0–359).
+ * Trả về 9.9 nếu dữ liệu không hợp lệ (inf, nan, quá gần).
+ */
+static inline float lidar_tai(const float *anh, int goc) {
+  int vi_tri = ((goc % 360) + 360) % 360;
+  float d = anh[vi_tri];
+  return (d < 0.01f || isinf(d) || isnan(d)) ? 9.9f : d;
 }
 
-// [FIX] Hàm lấy khoảng cách vật cản nằm trực diện phía trước mũi robot.
-// Lấy trung bình cộng các tia Lidar trong phạm vi góc ±5° (từ -5° đến 5°) để
-// giảm tín hiệu nhiễu, giúp robot nhận biết chính xác khi chuẩn bị đâm vào
-// tường.
-static float lidarFront(const float *img) {
-  float sum = 0;
-  int cnt = 0;
-  for (int offset = -5; offset <= 5; offset++) {
-    int idx = ((offset) % 360 + 360) % 360;
-    float v = img[idx];
-    if (v > 0.01f && !std::isinf(v) && !std::isnan(v)) {
-      sum += v;
-      cnt++;
-    }
-  }
-  return (cnt > 0) ? sum / cnt : 9.9f;
-}
-
-// Hàm tính giá trị khoảng cách trung bình từ Lidar trong một khoảng góc từ
-// deg_start tới deg_end. Thường dùng trong việc quét tìm các bức tường bên hông
-// trái/phải để so sánh khoảng cách.
-static float lidarAvg(const float *img, int deg_start, int deg_end) {
-  float sum = 0;
-  int cnt = 0;
-  for (int d = deg_start; d <= deg_end; d++) {
-    float v = lidarAt(img, d);
+/**
+ * Tính trung bình các giá trị LiDAR trong phạm vi [goc_dau, goc_cuoi].
+ * Bỏ qua các giá trị không hợp lệ (≥ 9.0).
+ */
+static float lidar_trung_binh(const float *anh, int goc_dau, int goc_cuoi) {
+  float tong = 0.0f;
+  int dem = 0;
+  for (int g = goc_dau; g <= goc_cuoi; g++) {
+    float v = lidar_tai(anh, g);
     if (v < 9.0f) {
-      sum += v;
-      cnt++;
+      tong += v;
+      dem++;
     }
   }
-  return (cnt > 0) ? sum / cnt : 9.9f;
+  return (dem > 0) ? tong / dem : 9.9f;
 }
 
-// Chuyển đổi từ Tọa độ thực (x, y tính bằng mét) sang Tọa độ ô lưới (c: cột, r:
-// dòng) Dùng để xác định vị trí của robot hoặc điểm cần đánh dấu trên mảng 2
-// chiều map.
-static void worldToGrid(double x, double y, int &c, int &r) {
-  c = (int)std::floor(x / CELL_SIZE) + OFFSET_X;
-  r = (int)std::floor(y / CELL_SIZE) + OFFSET_Y;
+/**
+ * Chuyển tọa độ thế giới (m) → chỉ số ô lưới (cột, hàng).
+ */
+static void the_gioi_ra_luoi(double x, double y, int &cot, int &hang) {
+  cot = (int)floor(x / O_LUOI_KICH_THUOC) + LUOI_DICH_COT;
+  hang = (int)floor(y / O_LUOI_KICH_THUOC) + LUOI_DICH_HANG;
 }
 
-// Chuyển đổi ngược lại từ Tọa độ ô lưới (c, r) ra Tọa độ thực tâm ô (x, y tính
-// bằng mét) Dùng khi BFS tìm được đích (là 1 ô) và cần trả tọa độ thực về cho
-// bộ điều khiển di chuyển tới.
-static void gridToWorld(int c, int r, double &x, double &y) {
-  x = (c - OFFSET_X) * CELL_SIZE + (CELL_SIZE * 0.5);
-  y = (r - OFFSET_Y) * CELL_SIZE + (CELL_SIZE * 0.5);
+/**
+ * Chuyển chỉ số ô lưới → tọa độ tâm ô trong thế giới (m).
+ */
+static void luoi_ra_the_gioi(int cot, int hang, double &x, double &y) {
+  x = (cot - LUOI_DICH_COT) * O_LUOI_KICH_THUOC + (O_LUOI_KICH_THUOC * 0.5);
+  y = (hang - LUOI_DICH_HANG) * O_LUOI_KICH_THUOC + (O_LUOI_KICH_THUOC * 0.5);
 }
 
-// [O5-FIX] Hàm Cập nhật Bản đồ Lưới (Grid Map) dựa trên dữ liệu Lidar
-// Mục tiêu: Ghi nhận vị trí các bức tường (vật cản) vào ma trận lưới.
-// Để tối ưu bộ nhớ và thời gian, robot chỉ lấy mẫu cảm biến ở 3 hướng (Trước
-// mặt, Bên trái, Bên phải) với khoảng cách cắt ngắn (0.5m). Tránh được tình
-// trạng nhận nhầm khoảng cách xa hoặc nhiễu.
-static void updateMap(const float *img, double rx, double ry, double ryaw,
-                      double w_vel) {
-  if (!img || std::abs(w_vel) > 0.5)
-    return; // Bỏ qua cập nhật map khi Lidar chưa sẵn sàng hoặc robot đang xoay
-            // quá nhanh (dễ gây méo bản đồ)
+/**
+ * Cập nhật bản đồ lưới từ dữ liệu LiDAR.
+ * Bỏ qua khi robot đang quay nhanh (van_toc_goc > 1 rad/s) để tránh lỗi.
+ */
+static void cap_nhat_ban_do(const float *anh, double rx, double ry,
+                            double goc_robot, double van_toc_goc) {
+  if (!anh || abs(van_toc_goc) > 1.0)
+    return;
 
-  // 3 hướng tương đối với mũi robot (chỉ số tia Lidar): Trước (0°), Trái (90°),
-  // Phải (270°)
-  static const int robot_dirs[3] = {0, 90, 270};
+  for (int i = 0; i < 360; i += 5) {
+    float kc = anh[i];
+    if (kc <= 0.05f || kc >= 2.0f)
+      continue; // ngoài tầm hữu ích
 
-  for (int d = 0; d < 3; d++) {
-    int lidar_idx = robot_dirs[d];
+    // Tọa độ thế giới của điểm phản xạ
+    double goc_the_gioi = chuan_hoa_goc(goc_robot - i * DO_SANG_RAD);
+    int cot, hang;
+    the_gioi_ra_luoi(rx + kc * cos(goc_the_gioi), ry + kc * sin(goc_the_gioi),
+                     cot, hang);
 
-    // Lấy khoảng cách tia trung bình ±3° quanh hướng đó để giảm nhiễu
-    float sum = 0;
-    int cnt = 0;
-    for (int offset = -3; offset <= 3; offset++) {
-      int idx = ((lidar_idx + offset) % 360 + 360) % 360;
-      float v = img[idx];
-      // Chỉ phát hiện vật cản trong phạm vi 0.50m
-      if (v > 0.05f && v <= 0.50f && !std::isinf(v) && !std::isnan(v)) {
-        sum += v;
-        cnt++;
-      }
-    }
-    if (cnt == 0)
-      continue;
-    float r = sum / cnt;
-
-    // Tính góc world-frame của tia này
-    double world_ang = normAng(ryaw - lidar_idx * DEG2RAD);
-
-    // Chiếu điểm obstacle
-    int gc, gr;
-    worldToGrid(rx + r * std::cos(world_ang), ry + r * std::sin(world_ang), gc,
-                gr);
-    if ((unsigned)gc >= (unsigned)GRID_W || (unsigned)gr >= (unsigned)GRID_H)
+    // Kiểm tra trong biên lưới
+    if ((unsigned)cot >= (unsigned)LUOI_SO_COT ||
+        (unsigned)hang >= (unsigned)LUOI_SO_HANG)
       continue;
 
-    GridCell &cell = grid[gr][gc];
+    OLuoi &o = ban_do[hang][cot];
+    if (o.trang_thai == 2)
+      continue; // ô đã là vật cản – bỏ qua
 
-    // Tránh ghi đè lên ô đã đi qua hoặc đã đánh dấu
-    if (cell.status == 1 || cell.status == 2)
-      continue;
-
-    // Tăng hit nhanh hơn vì chỉ có 3 tia
-    int weight = 4;
-    cell.hits = (int8_t)std::min((int)cell.hits + weight, 100);
-    if (cell.hits >= 6)
-      cell.status = 2;
+    // Tích lũy điểm tin cậy
+    int them = (kc < 1.0f) ? 3 : 1;
+    o.diem_tin = (int8_t)min((int)o.diem_tin + them, 100);
+    if (o.diem_tin > 5)
+      o.trang_thai = 2; // xác nhận là vật cản
   }
 }
 
-// ============================================================
-// [O3] Thuật toán tìm đường BFS (Breadth-First Search)
-// Chức năng: Tìm đường đi ngắn nhất từ ô hiện tại (sc, sr) đến ô gần nhất chưa
-// được dọn dẹp (status = 0). Thuật toán quét lan ra xung quanh, tránh các ô vật
-// cản (status = 2) và đánh dấu đường đi bằng mảng 'parent'. Kết quả trả về là
-// một danh sách (vector) các điểm (Point2D) tạo thành đường dẫn để robot chạy
-// theo.
-// ============================================================
-std::vector<Point2D> findUnvisited(int sc, int sr) {
-  if ((unsigned)sc >= (unsigned)GRID_W || (unsigned)sr >= (unsigned)GRID_H)
+/**
+ * BFS từ ô (cot_dau, hang_dau), tìm ô chưa thăm (trang_thai == 0) gần nhất.
+ * Trả về đường đi dạng vector<DiemLuoi> từ điểm xuất phát → điểm đích.
+ * Trả về vector rỗng nếu không còn ô nào chưa thăm.
+ */
+vector<DiemLuoi> tim_o_chua_tham(int cot_dau, int hang_dau) {
+  if ((unsigned)cot_dau >= (unsigned)LUOI_SO_COT ||
+      (unsigned)hang_dau >= (unsigned)LUOI_SO_HANG)
     return {};
 
-  // Mảng parent 1 chiều (làm phẳng 2D thành 1D), dùng để lưu dấu vết ô trước
-  // đó. Giá trị -1 nghĩa là chưa thăm.
-  int parent[GRID_H * GRID_W];
-  std::fill(parent, parent + GRID_H * GRID_W, -1);
+  // Mảng lưu cha (index 1D) để truy vết đường đi
+  static int cha[LUOI_SO_HANG * LUOI_SO_COT];
+  fill(cha, cha + LUOI_SO_HANG * LUOI_SO_COT, -1);
 
-  auto idx = [](int c, int r) { return r * GRID_W + c; };
-  int start = idx(sc, sr);
-  parent[start] = start; // self-parent đánh dấu đã thăm
+  auto chi_so_1d = [](int c, int h) { return h * LUOI_SO_COT + c; };
 
-  std::queue<int> q;
-  q.push(start);
+  int bat_dau = chi_so_1d(cot_dau, hang_dau);
+  cha[bat_dau] = bat_dau; // điểm gốc tự trỏ về mình
 
+  queue<int> hang_doi;
+  hang_doi.push(bat_dau);
+
+  // 4 hướng di chuyển (lên, xuống, trái, phải)
   const int dc[] = {0, 0, -1, 1};
-  const int dr[] = {-1, 1, 0, 0};
-  int goal = -1;
+  const int dh[] = {-1, 1, 0, 0};
 
-  while (!q.empty() && goal < 0) {
-    int cur = q.front();
-    q.pop();
-    int cc = cur % GRID_W, cr = cur / GRID_W;
-    if (grid[cr][cc].status == 0) {
-      goal = cur;
+  int muc_tieu = -1;
+
+  while (!hang_doi.empty() && muc_tieu < 0) {
+    int hien = hang_doi.front();
+    hang_doi.pop();
+
+    int cc = hien % LUOI_SO_COT;
+    int ch = hien / LUOI_SO_COT;
+
+    // Tìm thấy ô chưa thăm
+    if (ban_do[ch][cc].trang_thai == 0) {
+      muc_tieu = hien;
       break;
     }
+
+    // Mở rộng BFS sang 4 ô lân cận
     for (int i = 0; i < 4; i++) {
-      int nc = cc + dc[i], nr = cr + dr[i];
-      if ((unsigned)nc >= (unsigned)GRID_W || (unsigned)nr >= (unsigned)GRID_H)
+      int nc = cc + dc[i];
+      int nh = ch + dh[i];
+
+      if ((unsigned)nc >= (unsigned)LUOI_SO_COT ||
+          (unsigned)nh >= (unsigned)LUOI_SO_HANG)
         continue;
-      int nidx = idx(nc, nr);
-      if (parent[nidx] >= 0 || grid[nr][nc].status == 2)
+
+      int cs = chi_so_1d(nc, nh);
+      if (cha[cs] >= 0 || ban_do[nh][nc].trang_thai == 2)
         continue;
-      parent[nidx] = cur;
-      q.push(nidx);
+
+      cha[cs] = hien;
+      hang_doi.push(cs);
     }
   }
 
-  if (goal < 0)
-    return {};
+  if (muc_tieu < 0)
+    return {}; // không tìm thấy ô nào
 
-  // Truy vết ngược
-  std::vector<Point2D> path;
-  for (int cur = goal; cur != start; cur = parent[cur])
-    path.push_back({cur % GRID_W, cur / GRID_W});
-  path.push_back({sc, sr});
-  std::reverse(path.begin(), path.end());
-  return path;
+  // Truy vết đường đi từ đích về gốc, rồi đảo ngược
+  vector<DiemLuoi> duong;
+  for (int hien = muc_tieu; hien != bat_dau; hien = cha[hien])
+    duong.push_back({hien % LUOI_SO_COT, hien / LUOI_SO_COT});
+  duong.push_back({cot_dau, hang_dau});
+  reverse(duong.begin(), duong.end());
+  return duong;
 }
 
-// Hàm đếm số lượng ô lưới chưa thăm (status = 0) dọc theo một hướng (heading)
-// xuất phát từ (gc, gr). Hàm này phục vụ cơ chế kiểm tra nhanh xem hướng đang
-// chạy (hàng ZigZag hiện tại) có còn khu vực nào trống cần dọn dẹp không. Nếu
-// trả về 0, robot có thể bỏ qua và tìm đường khác ngay lập tức.
-static int countZerosInDir(int gc, int gr, double heading) {
-  int dx = (int)std::round(std::cos(heading));
-  int dy = (int)std::round(std::sin(heading));
-  int zeros = 0;
-  int cc = gc, cr = gr;
+/**
+ * Đếm số ô chưa có vật cản (trang_thai != 2) theo một hướng nhất định.
+ * Dùng để chọn hướng zigzag tối ưu sau khi BFS.
+ */
+static int dem_o_trong_theo_huong(int cot, int hang, double huong) {
+  int dc = (int)round(cos(huong));
+  int dh = (int)round(sin(huong));
+  int so_o = 0;
+  int cc = cot, ch = hang;
+
   while (true) {
-    cc += dx;
-    cr += dy;
-    if ((unsigned)cc >= (unsigned)GRID_W || (unsigned)cr >= (unsigned)GRID_H)
+    cc += dc;
+    ch += dh;
+    if ((unsigned)cc >= (unsigned)LUOI_SO_COT ||
+        (unsigned)ch >= (unsigned)LUOI_SO_HANG ||
+        ban_do[ch][cc].trang_thai == 2)
       break;
-    if (grid[cr][cc].status == 2)
-      break;
-    if (grid[cr][cc].status == 0)
-      zeros++;
+    if (ban_do[ch][cc].trang_thai == 0)
+      so_o++;
   }
-  return zeros;
+  return so_o;
 }
 
 // ============================================================
-// MAIN
+//  HÀM MAIN
 // ============================================================
 int main() {
   Robot *robot = new Robot();
-  int ts = (int)robot->getBasicTimeStep();
+  int buoc_ms = (int)robot->getBasicTimeStep(); // [ms]
 
-  Motor *mL = robot->getMotor("left wheel motor");
-  Motor *mR = robot->getMotor("right wheel motor");
-  mL->setPosition(INFINITY);
-  mR->setPosition(INFINITY);
+  // --- Khởi tạo thiết bị ---
+  Motor *dc_trai = robot->getMotor("left wheel motor");
+  Motor *dc_phai = robot->getMotor("right wheel motor");
+  dc_trai->setPosition(INFINITY); // chế độ điều khiển vận tốc
+  dc_phai->setPosition(INFINITY);
 
-  PositionSensor *psL = robot->getPositionSensor("left wheel sensor");
-  PositionSensor *psR = robot->getPositionSensor("right wheel sensor");
-  psL->enable(ts);
-  psR->enable(ts);
+  PositionSensor *enc_trai = robot->getPositionSensor("left wheel sensor");
+  PositionSensor *enc_phai = robot->getPositionSensor("right wheel sensor");
+  enc_trai->enable(buoc_ms);
+  enc_phai->enable(buoc_ms);
 
   Lidar *lidar = robot->getLidar("LDS-01");
-  lidar->enable(ts);
-
   InertialUnit *imu = robot->getInertialUnit("inertial unit");
-  imu->enable(ts);
+  lidar->enable(buoc_ms);
+  imu->enable(buoc_ms);
 
-  TouchSensor *bL = robot->getTouchSensor("bumper_left");
-  TouchSensor *bR = robot->getTouchSensor("bumper_right");
-  if (bL)
-    bL->enable(ts);
-  if (bR)
-    bR->enable(ts);
+  TouchSensor *bumper_trai = robot->getTouchSensor("bumper_left");
+  TouchSensor *bumper_phai = robot->getTouchSensor("bumper_right");
+  if (bumper_trai)
+    bumper_trai->enable(buoc_ms);
+  if (bumper_phai)
+    bumper_phai->enable(buoc_ms);
 
-  State state = SCAN_360;
-  RobotState rs;
+  // --- Khởi tạo FSM ---
+  TrangThai trang_thai = QUET_360;
+  TrangThaiRobot rs;
+  printf("[Hệ Thống] Khởi động – Phase 1: Tìm góc tường...\n");
 
-  printf("[Hệ Thống] Bắt đầu khởi động (Phase 1: Tìm góc)...\n");
+  // ============================================================
+  //  VÒNG LẶP ĐIỀU KHIỂN CHÍNH
+  // ============================================================
+  while (robot->step(buoc_ms) != -1) {
 
-  while (robot->step(ts) != -1) {
-    const double yaw = imu->getRollPitchYaw()[2];
-    const double dt = ts / 1000.0;
+    // --- Đọc cảm biến ---
+    const double yaw = imu->getRollPitchYaw()[2]; // [rad]
+    const double dt = buoc_ms / 1000.0;           // [s]
 
-    // Tính vận tốc góc (lọc bản đồ khi quay nhanh)
-    if (rs.first_step) {
-      rs.last_yaw = yaw;
-      rs.first_step = false;
+    // Tính vận tốc góc (dùng để lọc bản đồ khi quay nhanh)
+    if (rs.buoc_dau) {
+      rs.goc_truoc = yaw;
+      rs.buoc_dau = false;
     }
-    const double w_vel = normAng(yaw - rs.last_yaw) / dt;
-    rs.last_yaw = yaw;
+    const double van_toc_goc = chuan_hoa_goc(yaw - rs.goc_truoc) / dt;
+    rs.goc_truoc = yaw;
 
-    const float *img = lidar->getRangeImage();
-    if (!img)
+    const float *anh_lidar = lidar->getRangeImage();
+    if (!anh_lidar)
       continue;
 
-    // [O6] Odometry tính delta trực tiếp
-    const double curL = psL->getValue(), curR = psR->getValue();
-    const double delta =
-        ((curL - rs.lastEncL) + (curR - rs.lastEncR)) * 0.5 * WHEEL_R;
-    rs.rx += delta * std::cos(yaw);
-    rs.ry += delta * std::sin(yaw);
-    rs.lastEncL = curL;
-    rs.lastEncR = curR;
+    // --- Odometry vi sai ---
+    const double enc_L = enc_trai->getValue();
+    const double enc_R = enc_phai->getValue();
+    const double delta = ((enc_L - rs.enc_trai_cu) + (enc_R - rs.enc_phai_cu)) *
+                         0.5 * BANH_XE_BAN_KINH;
+    rs.vi_tri_x += delta * cos(yaw);
+    rs.vi_tri_y += delta * sin(yaw);
+    rs.enc_trai_cu = enc_L;
+    rs.enc_phai_cu = enc_R;
 
+    // --- Cập nhật bản đồ ---
     int gc, gr;
-    worldToGrid(rs.rx, rs.ry, gc, gr);
-    if ((unsigned)gc < (unsigned)GRID_W && (unsigned)gr < (unsigned)GRID_H)
-      grid[gr][gc].status = 1;
+    the_gioi_ra_luoi(rs.vi_tri_x, rs.vi_tri_y, gc, gr);
 
-    updateMap(img, rs.rx, rs.ry, yaw, w_vel);
+    // Đánh dấu ô robot đứng và 8 ô xung quanh là "đã thăm"
+    for (int di = -1; di <= 1; di++) {
+      for (int dj = -1; dj <= 1; dj++) {
+        int hc = gc + di, hr = gr + dj;
+        if ((unsigned)hc < (unsigned)LUOI_SO_COT &&
+            (unsigned)hr < (unsigned)LUOI_SO_HANG &&
+            ban_do[hr][hc].trang_thai != 2)
+          ban_do[hr][hc].trang_thai = 1;
+      }
+    }
+    cap_nhat_ban_do(anh_lidar, rs.vi_tri_x, rs.vi_tri_y, yaw, van_toc_goc);
 
-    double cv = 0, co = 0;
-    const bool bumped =
-        (bL && bL->getValue() > 0.5) || (bR && bR->getValue() > 0.5);
+    // Phát hiện va chạm qua bumper
+    const bool va_cham = (bumper_trai && bumper_trai->getValue() > 0.5) ||
+                         (bumper_phai && bumper_phai->getValue() > 0.5);
 
-    switch (state) {
-    // ========================================================
-    // PHASE 1: TÌM VÀ ÉP GÓC
-    // ========================================================
-    case SCAN_360: {
-      // [O9] Chụp snapshot 1 bước, không cần rotate
-      float min_d = 99.0f;
-      int min_idx = 0;
+    // Đầu ra điều khiển (reset mỗi bước)
+    double cv = 0.0; // vận tốc tịnh tiến [m/s]
+    double co = 0.0; // vận tốc góc       [rad/s]
+
+    // ============================================================
+    //  FSM – XỬ LÝ TỪNG TRẠNG THÁI
+    // ============================================================
+    switch (trang_thai) {
+
+    // ------------------------------------------------------------
+    //  PHASE 1: TÌM GÓC TƯỜNG
+    // ------------------------------------------------------------
+
+    // Quét toàn bộ 360° LiDAR, tìm hướng về tường gần nhất
+    case QUET_360: {
+      float kc_nho_nhat = 99.0f;
+      int goc_nho_nhat = 0;
       for (int i = 0; i < 360; i++) {
-        float dv = lidarAt(img, i);
-        if (dv < min_d) {
-          min_d = dv;
-          min_idx = i;
+        float d = lidar_tai(anh_lidar, i);
+        if (d < kc_nho_nhat) {
+          kc_nho_nhat = d;
+          goc_nho_nhat = i;
         }
       }
+      rs.goc_muc_tieu = rs.goc_tuong_1 =
+          chuan_hoa_goc(yaw - goc_nho_nhat * DO_SANG_RAD);
+      trang_thai = QUAY_VE_TUONG_1;
+    } break;
 
-      // Nếu không nhận được tín hiệu lidar (tất cả đều ngoài phạm vi)
-      if (min_d >= 9.0f) {
-        if (bumped) {
-          cv = BACKUP_SPD;
-        } else {
-          cv = FWD_SPD;
-        }
-        co = 0.0;
+    // Quay về hướng tường thứ nhất
+    case QUAY_VE_TUONG_1:
+      co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC)
+        trang_thai = TIEN_DEN_TUONG_1;
+      break;
+
+    // Tiến thẳng đến tường thứ nhất
+    case TIEN_DEN_TUONG_1:
+      if (va_cham) {
+        trang_thai = LUI_1;
+      } else if (lidar_tai(anh_lidar, 0) < DUNG_TUONG_1) {
+        trang_thai = TIM_TUONG_2;
       } else {
-        rs.wall1_yaw = normAng(yaw - min_idx * DEG2RAD);
-        rs.target_yaw = rs.wall1_yaw;
-        state = TURN_TO_WALL1;
+        cv = V_TIEN_TUONG_1;
+        co = KP_GIU_THANG * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
       }
-    } break;
-
-    case TURN_TO_WALL1: {
-      double err = normAng(rs.target_yaw - yaw);
-      co = KP_T * err;
-      if (std::abs(err) < TURN_THR)
-        state = APPROACH_WALL1;
-    } break;
-
-    case APPROACH_WALL1: {
-      float front = lidarFront(img);
-      if (bumped)
-        state = BACKUP_1;
-      else if (front < WALL1_STOP)
-        state = FIND_WALL2;
-      else {
-        cv = APPROACH_SPD;
-        co = KP_H * normAng(rs.target_yaw - yaw);
-      }
-    } break;
-
-    case BACKUP_1:
-      cv = BACKUP_SPD;
-      if (!bumped)
-        state = FIND_WALL2;
       break;
 
-    case FIND_WALL2: {
-      float left_d = lidarAvg(img, 80, 100);
-      float right_d = lidarAvg(img, 260, 280);
-      rs.wall2_dir = (left_d <= right_d) ? +1 : -1;
-      rs.target_yaw = normAng(yaw + rs.wall2_dir * M_PI * 0.5);
-      state = TURN_TO_WALL2;
-    } break;
-
-    case TURN_TO_WALL2: {
-      double err = normAng(rs.target_yaw - yaw);
-      co = KP_T * err;
-      if (std::abs(err) < TURN_THR)
-        state = APPROACH_WALL2;
-    } break;
-
-    case APPROACH_WALL2: {
-      float front = lidarFront(img);
-      if (bumped)
-        state = BACKUP_2;
-      else if (front < WALL2_STOP)
-        state = CORNER_ALIGN;
-      else {
-        cv = WALL2_SPD;
-        co = KP_H * normAng(rs.target_yaw - yaw);
-      }
-    } break;
-
-    case BACKUP_2:
-      cv = BACKUP_SPD;
-      if (!bumped)
-        state = CORNER_ALIGN;
+    // Lùi ra sau khi va chạm tường 1
+    case LUI_1:
+      cv = V_LUI;
+      if (!va_cham)
+        trang_thai = TIM_TUONG_2;
       break;
 
-    case CORNER_ALIGN: {
-      double snapped = std::round(yaw / (M_PI * 0.5)) * (M_PI * 0.5);
-      double err = normAng(snapped - yaw);
-      co = KP_T * err;
-      if (std::abs(err) < TURN_THR) {
-        rs.base_heading = normAng(snapped + M_PI);
-        rs.row_heading = rs.base_heading;
-        rs.turn_dir = -rs.wall2_dir;
-        rs.target_yaw = rs.base_heading;
-        rs.shift_blocked = false;
-        printf("[Chuyển đổi] Căn góc xong. Quay 180° để quét bù hàng 1...\n");
-        state = TURN_180_RECOVERY;
+    // Xác định chiều quay để tìm tường thứ hai (vuông góc)
+    case TIM_TUONG_2: {
+      float kc_phai = lidar_trung_binh(anh_lidar, 80, 100);
+      float kc_trai = lidar_trung_binh(anh_lidar, 260, 280);
+      rs.chieu_tuong_2 = (kc_phai <= kc_trai) ? +1 : -1;
+      rs.goc_muc_tieu = chuan_hoa_goc(yaw + rs.chieu_tuong_2 * M_PI * 0.5);
+      trang_thai = QUAY_VE_TUONG_2;
+    } break;
+
+    // Quay về hướng tường thứ hai
+    case QUAY_VE_TUONG_2:
+      co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC)
+        trang_thai = TIEN_DEN_TUONG_2;
+      break;
+
+    // Tiến đến tường thứ hai
+    case TIEN_DEN_TUONG_2:
+      if (va_cham) {
+        trang_thai = LUI_2;
+      } else if (lidar_tai(anh_lidar, 0) < DUNG_TUONG_2) {
+        trang_thai = CAN_CHINH_GOC;
+      } else {
+        cv = V_TIEN_TUONG_2;
+        co = KP_GIU_THANG * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
+      }
+      break;
+
+    // Lùi ra sau khi va chạm tường 2
+    case LUI_2:
+      cv = V_LUI;
+      if (!va_cham)
+        trang_thai = CAN_CHINH_GOC;
+      break;
+
+    // Căn chỉnh góc robot về bội số 90° gần nhất
+    case CAN_CHINH_GOC: {
+      double goc_gan_nhat = round(yaw / (M_PI * 0.5)) * (M_PI * 0.5);
+      double sai_so = chuan_hoa_goc(goc_gan_nhat - yaw);
+      co = KP_QUAY * sai_so;
+      if (abs(sai_so) < NGUONG_SAI_SO_GOC) {
+        // Lưu hướng hàng zigzag (ngược lại 180°)
+        rs.goc_muc_tieu = rs.huong_hang = rs.huong_goc =
+            chuan_hoa_goc(yaw + sai_so + M_PI);
+        rs.chieu_queo = -rs.chieu_tuong_2;
+        rs.dich_bi_chan = false;
+        printf("[Phase 1 → 2] Căn góc xong. Quay 180°...\n");
+        trang_thai = QUAY_180;
       }
     } break;
 
-    case TURN_180_RECOVERY: {
-      double err = normAng(rs.target_yaw - yaw);
-      co = KP_T * err;
-      if (std::abs(err) < TURN_THR) {
-        printf("[Phase 2] Đã quay xong 180°. Bắt đầu FORWARD quét hàng 1!\n");
-        state = FORWARD;
+    // ------------------------------------------------------------
+    //  PHASE 2: QUAY 180° ĐỂ CHUẨN BỊ QUÉT
+    // ------------------------------------------------------------
+    case QUAY_180:
+      co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
+        printf("[Phase 2 → 3] Bắt đầu quét ZigZag!\n");
+        trang_thai = TIEN;
+      }
+      break;
+
+    // ------------------------------------------------------------
+    //  PHASE 3: QUÉT ZIGZAG
+    // ------------------------------------------------------------
+
+    // Tiến thẳng theo hàng hiện tại
+    case TIEN: {
+      cv = V_ZIGZAG;
+      co = KP_GIU_THANG * chuan_hoa_goc(rs.huong_hang - yaw);
+
+      if (va_cham) {
+        trang_thai = LUI;
+        break;
+      }
+
+      bool gap_vat_can = (lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN);
+      bool het_hang = rs.dang_phuc_hoi &&
+                      dem_o_trong_theo_huong(gc, gr, rs.huong_hang) == 0;
+
+      if (gap_vat_can || het_hang) {
+        // Kiểm tra còn ô nào chưa thăm không
+        bool xong_het = true;
+        for (int i = 0; i < LUOI_SO_HANG && xong_het; i++)
+          for (int j = 0; j < LUOI_SO_COT && xong_het; j++)
+            if (ban_do[i][j].trang_thai == 0)
+              xong_het = false;
+
+        if (xong_het) {
+          trang_thai = HOAN_THANH;
+        } else {
+          rs.goc_muc_tieu =
+              chuan_hoa_goc(rs.huong_hang + rs.chieu_queo * M_PI * 0.5);
+          rs.dich_bi_chan = false;
+          trang_thai = QUAY_1;
+        }
       }
     } break;
 
-    // ========================================================
-    // PHASE 2: ZIGZAG SWEEP
-    // ========================================================
-    case FORWARD: {
-      cv = FWD_SPD;
-      co = KP_H * normAng(rs.row_heading - yaw);
-      if (bumped) {
-        state = BACKUP;
-      } else if (lidarFront(img) < (float)OBSTACLE ||
-                 (rs.is_recovery &&
-                  countZerosInDir(gc, gr, rs.row_heading) == 0)) {
-        // Tối ưu bám viền (Zigzag hẹp): Nếu đang ở phase phục hồi và phía trước
-        // không còn ô 0 nào, quẹo sớm! Dừng thông minh: Kiểm tra ngay nếu map
-        // không còn ô không nào
-        bool all_done = true;
-        for (int i = 0; i < GRID_H; i++) {
-          for (int j = 0; j < GRID_W; j++) {
-            if (grid[i][j].status == 0) {
-              all_done = false;
-              break;
+    // Lùi ra sau khi va chạm ở phase zigzag
+    case LUI:
+      cv = V_LUI;
+      co = KP_GIU_THANG * chuan_hoa_goc(rs.huong_hang - yaw);
+      if (!va_cham) {
+        rs.goc_muc_tieu =
+            chuan_hoa_goc(rs.huong_hang + rs.chieu_queo * M_PI * 0.5);
+        rs.dich_bi_chan = false;
+        trang_thai = QUAY_1;
+      }
+      break;
+
+    // Quay 90° sang hướng hàng kế tiếp
+    case QUAY_1:
+      co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
+        if (lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN) {
+          // Bị chặn ngay khi quay xong → chuyển BFS
+          rs.dich_bi_chan = true;
+          rs.huong_tiep_tuc = rs.huong_hang;
+          rs.luu_cot = gc;
+          rs.luu_hang = gr;
+          trang_thai = KIEM_TRA_BAN_DO;
+        } else {
+          // Bình thường → dịch sang hàng mới
+          rs.dich_bat_dau_x = rs.vi_tri_x;
+          rs.dich_bat_dau_y = rs.vi_tri_y;
+          trang_thai = DICH_HANG;
+        }
+      }
+      break;
+
+    // Dịch chuyển ngang KHOANG_DICH_HANG để sang hàng kế tiếp
+    case DICH_HANG: {
+      cv = V_DICH_HANG;
+      co = KP_GIU_THANG * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
+
+      double khoang_da_di = hypot(rs.vi_tri_x - rs.dich_bat_dau_x,
+                                  rs.vi_tri_y - rs.dich_bat_dau_y);
+      bool bi_chan = lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN || va_cham;
+
+      if (bi_chan && khoang_da_di < KHOANG_DICH_HANG * 0.5) {
+        // Chưa dịch được nửa đoạn mà đã bị chặn → BFS
+        rs.dich_bi_chan = true;
+        rs.huong_tiep_tuc = rs.huong_hang;
+        rs.luu_cot = gc;
+        rs.luu_hang = gr;
+        trang_thai = KIEM_TRA_BAN_DO;
+      } else if (khoang_da_di >= KHOANG_DICH_HANG || bi_chan) {
+        // Đủ khoảng dịch (hoặc bị chặn sau nửa đoạn) → quay về hàng
+        rs.goc_muc_tieu =
+            chuan_hoa_goc(rs.goc_muc_tieu + rs.chieu_queo * M_PI * 0.5);
+        trang_thai = QUAY_2;
+      }
+    } break;
+
+    // Quay 90° lần 2 để quay lại hướng chạy hàng
+    case QUAY_2:
+      co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
+        rs.huong_hang = rs.goc_muc_tieu;
+        rs.chieu_queo *= -1; // đổi chiều queo để hình thành chữ S
+        if (lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN) {
+          rs.huong_tiep_tuc = rs.huong_hang;
+          rs.luu_cot = gc;
+          rs.luu_hang = gr;
+          trang_thai = KIEM_TRA_BAN_DO;
+        } else {
+          trang_thai = TIEN;
+        }
+      }
+      break;
+
+    // ------------------------------------------------------------
+    //  PHASE 4: ĐIỀU HƯỚNG BFS + PHỤC HỒI
+    // ------------------------------------------------------------
+
+    // Chạy BFS tìm ô chưa thăm gần nhất
+    case KIEM_TRA_BAN_DO:
+      cv = co = 0;
+      rs.duong_di = tim_o_chua_tham(rs.luu_cot, rs.luu_hang);
+      if (rs.duong_di.empty()) {
+        trang_thai = HOAN_THANH;
+      } else {
+        rs.chi_so = 1;
+        trang_thai =
+            (rs.chi_so >= rs.duong_di.size()) ? CAN_LAI_HUONG : DH_QUAY;
+      }
+      break;
+
+    // Quay về hướng điểm BFS tiếp theo
+    case DH_QUAY: {
+      double tx, ty;
+      luoi_ra_the_gioi(rs.duong_di[rs.chi_so].cot, rs.duong_di[rs.chi_so].hang,
+                       tx, ty);
+      double goc_den = atan2(ty - rs.vi_tri_y, tx - rs.vi_tri_x);
+      co = KP_QUAY * chuan_hoa_goc(goc_den - yaw);
+      if (abs(chuan_hoa_goc(goc_den - yaw)) < NGUONG_SAI_SO_GOC)
+        trang_thai = DH_TIEN;
+    } break;
+
+    // Tiến đến điểm BFS tiếp theo
+    case DH_TIEN: {
+      double tx, ty;
+      luoi_ra_the_gioi(rs.duong_di[rs.chi_so].cot, rs.duong_di[rs.chi_so].hang,
+                       tx, ty);
+      double goc_den = atan2(ty - rs.vi_tri_y, tx - rs.vi_tri_x);
+      cv = V_DIEU_HUONG;
+      co = KP_GIU_THANG * chuan_hoa_goc(goc_den - yaw);
+
+      if (va_cham || lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN) {
+        trang_thai = DH_LUI;
+        break;
+      }
+
+      if (hypot(tx - rs.vi_tri_x, ty - rs.vi_tri_y) < NGUONG_DEN_NOI) {
+        if (++rs.chi_so >= rs.duong_di.size()) {
+          // Đã đến đích BFS – chọn hướng zigzag tốt nhất
+          rs.dang_phuc_hoi = true;
+          double huong_tot_nhat = rs.huong_goc;
+          int so_o_nhieu_nhat = -1;
+          for (int i = 0; i < 4; i++) {
+            double h = rs.huong_goc + i * M_PI * 0.5;
+            int so_o = dem_o_trong_theo_huong(gc, gr, h);
+            if (so_o > so_o_nhieu_nhat) {
+              so_o_nhieu_nhat = so_o;
+              huong_tot_nhat = h;
             }
           }
-          if (!all_done)
-            break;
-        }
-
-        if (all_done) {
-          state = DONE; // Hoàn thiện 100% bản đồ, tắt máy!
-        } else if (rs.is_recovery) {
-          // Fix: Trong BFS recovery, khi hết ô 0, dùng BFS tìm đường thay vì
-          // zigzag mù
-          rs.saved_gc = gc;
-          rs.saved_gr = gr;
-          state = CHECK_MAP;
+          rs.huong_tiep_tuc = chuan_hoa_goc(huong_tot_nhat);
+          // Chọn chiều queo: bên nào còn nhiều ô hơn
+          int so_trai = dem_o_trong_theo_huong(
+              gc, gr, chuan_hoa_goc(huong_tot_nhat + M_PI * 0.5));
+          int so_phai = dem_o_trong_theo_huong(
+              gc, gr, chuan_hoa_goc(huong_tot_nhat - M_PI * 0.5));
+          rs.chieu_queo = (so_trai >= so_phai) ? 1 : -1;
+          trang_thai = CAN_LAI_HUONG;
         } else {
-          rs.target_yaw = normAng(rs.row_heading + rs.turn_dir * M_PI * 0.5);
-          rs.shift_blocked = false;
-          state = TURN_1;
+          trang_thai = DH_QUAY; // tiếp tục đến điểm kế
         }
       }
     } break;
 
-    case BACKUP:
-      cv = BACKUP_SPD;
-      co = KP_H * normAng(rs.row_heading - yaw);
-      if (!bumped) {
-        if (rs.is_recovery) {
-          rs.saved_gc = gc;
-          rs.saved_gr = gr;
-          state = CHECK_MAP;
-        } else {
-          rs.target_yaw = normAng(rs.row_heading + rs.turn_dir * M_PI * 0.5);
-          rs.shift_blocked = false;
-          state = TURN_1;
-        }
+    // Lùi khi gặp vật cản trong lúc BFS
+    case DH_LUI:
+      cv = V_LUI;
+      if (!va_cham) {
+        rs.luu_cot = gc;
+        rs.luu_hang = gr;
+        trang_thai = KIEM_TRA_BAN_DO;
       }
       break;
 
-    case TURN_1:
-      co = KP_T * normAng(rs.target_yaw - yaw);
-      if (std::abs(normAng(rs.target_yaw - yaw)) < TURN_THR) {
-        if (lidarFront(img) < (float)OBSTACLE) {
-          rs.shift_blocked = true;
-          rs.resume_heading = rs.row_heading;
-          rs.saved_gc = gc;
-          rs.saved_gr = gr;
-          state = CHECK_MAP;
-        } else {
-          rs.shift_start_x = rs.rx;
-          rs.shift_start_y = rs.ry;
-          state = SHIFT;
-        }
-      }
-      break;
-
-    case SHIFT: {
-      cv = FOLLOW_SPD;
-      co = KP_H * normAng(rs.target_yaw - yaw);
-      double dist =
-          std::hypot(rs.rx - rs.shift_start_x, rs.ry - rs.shift_start_y);
-      bool blocked = lidarFront(img) < (float)OBSTACLE || bumped;
-      if (blocked && dist < SHIFT_D * 0.5) {
-        rs.shift_blocked = true;
-        rs.resume_heading = rs.row_heading;
-        rs.saved_gc = gc;
-        rs.saved_gr = gr;
-        state = CHECK_MAP;
-      } else if (dist >= SHIFT_D || blocked) {
-        rs.target_yaw = normAng(rs.target_yaw + rs.turn_dir * M_PI * 0.5);
-        state = TURN_2;
-      }
-    } break;
-
-    case TURN_2:
-      co = KP_T * normAng(rs.target_yaw - yaw);
-      if (std::abs(normAng(rs.target_yaw - yaw)) < TURN_THR) {
-        rs.row_heading = rs.target_yaw;
-        rs.turn_dir *= -1;
-        if (lidarFront(img) < (float)OBSTACLE) {
-          rs.resume_heading = rs.row_heading;
-          rs.saved_gc = gc;
-          rs.saved_gr = gr;
-          state = CHECK_MAP;
-        } else {
-          state = FORWARD;
-        }
-      }
-      break;
-
-    // ========================================================
-    // PHASE 3: BFS NAVIGATION
-    // ========================================================
-    case CHECK_MAP:
-      cv = co = 0;
-      if (++rs.nav_retry > 4) {
-        if ((unsigned)rs.saved_gc < (unsigned)GRID_W &&
-            (unsigned)rs.saved_gr < (unsigned)GRID_H)
-          grid[rs.saved_gr][rs.saved_gc].status = 2;
-        rs.nav_retry = 0;
-      }
-      rs.nav_path = findUnvisited(rs.saved_gc, rs.saved_gr);
-      if (rs.nav_path.empty()) {
-        state = DONE;
-      } else {
-        rs.path_idx = 1;
-        state = (rs.path_idx >= rs.nav_path.size()) ? RESUME_ALIGN : NAV_TURN;
-      }
-      break;
-
-    case NAV_TURN: {
-      double tx, ty;
-      gridToWorld(rs.nav_path[rs.path_idx].c, rs.nav_path[rs.path_idx].r, tx,
-                  ty);
-      double ang = std::atan2(ty - rs.ry, tx - rs.rx);
-      co = KP_T * normAng(ang - yaw);
-      rs.nav_turn_steps++;
-      if (std::abs(normAng(ang - yaw)) < TURN_THR || rs.nav_turn_steps > 100) {
-        rs.nav_turn_steps = 0;
-        state = NAV_FORWARD;
-      }
-    } break;
-
-    case NAV_FORWARD: {
-      double tx, ty;
-      gridToWorld(rs.nav_path[rs.path_idx].c, rs.nav_path[rs.path_idx].r, tx,
-                  ty);
-      double ang = std::atan2(ty - rs.ry, tx - rs.rx);
-      cv = NAV_SPD;
-      co = KP_H * normAng(ang - yaw);
-
-      if (bumped || lidarFront(img) < (float)OBSTACLE) {
-        state = NAV_BACKUP;
-      } else if (std::hypot(tx - rs.rx, ty - rs.ry) < NAV_DIST_THR) {
-        rs.path_idx++;
-        if (rs.path_idx >= rs.nav_path.size()) {
-          state = RESUME_ALIGN;
-        } else {
-          state = NAV_TURN;
-        }
-      }
-    } break;
-
-    case NAV_BACKUP:
-      cv = BACKUP_SPD;
-      if (!bumped) {
-        rs.saved_gc = gc;
-        rs.saved_gr = gr;
-        rs.resume_heading = rs.row_heading;
-        state = CHECK_MAP;
-      }
-      break;
-
-    case RESUME_ALIGN:
+    // Căn lại hướng zigzag rồi tiếp tục quét
+    case CAN_LAI_HUONG:
       cv = 0;
-      rs.target_yaw = rs.resume_heading;
-      co = KP_T * normAng(rs.target_yaw - yaw);
-      if (std::abs(normAng(rs.target_yaw - yaw)) < TURN_THR) {
-        rs.row_heading = rs.resume_heading;
-        rs.is_recovery = true; // kích hoạt mode recovery
-        state = FORWARD;
+      rs.goc_muc_tieu = rs.huong_tiep_tuc;
+      co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
+        rs.huong_hang = rs.huong_tiep_tuc;
+        trang_thai = TIEN;
       }
       break;
 
-    // ========================================================
-    // PHASE 4: HOÀN THÀNH
-    // ========================================================
-    case DONE:
+    // ------------------------------------------------------------
+    //  HOÀN THÀNH
+    // ------------------------------------------------------------
+    case HOAN_THANH:
       cv = co = 0;
-      {
-        static bool printed = false;
-        if (!printed) {
-          printf("✓ Hoàn thành nhiệm vụ! Toàn bộ diện tích đã được phủ.\n");
-          printed = true;
-        }
+      static bool da_in = false;
+      if (!da_in) {
+        printf("✓ Hoàn thành! Toàn bộ diện tích đã được phủ.\n");
+        da_in = true;
       }
       break;
-    }
 
-    diffDrive(cv, co, mL, mR);
-  }
+    } // end switch
+
+    // Gửi lệnh điều khiển xuống motor
+    dieu_khien_vi_sai(cv, co, dc_trai, dc_phai);
+
+  } // end while
 
   delete robot;
   return 0;
