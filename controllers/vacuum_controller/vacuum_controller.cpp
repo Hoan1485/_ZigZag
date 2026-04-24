@@ -157,6 +157,8 @@ struct RobotState {
       0; // Chỉ số của điểm mục tiêu (waypoint) tiếp theo trong mảng nav_path
   bool is_recovery = false; // Cờ trạng thái: Robot đã tiến vào quá trình tự
                             // phục hồi quét các vùng sót
+  int nav_retry = 0;
+  int nav_turn_steps = 0;
 };
 
 // ============================================================
@@ -315,7 +317,7 @@ std::vector<Point2D> findUnvisited(int sc, int sr) {
 
   // Mảng parent 1 chiều (làm phẳng 2D thành 1D), dùng để lưu dấu vết ô trước
   // đó. Giá trị -1 nghĩa là chưa thăm.
-  static int parent[GRID_H * GRID_W];
+  int parent[GRID_H * GRID_W];
   std::fill(parent, parent + GRID_H * GRID_W, -1);
 
   auto idx = [](int c, int r) { return r * GRID_W + c; };
@@ -681,6 +683,12 @@ int main() {
     // ========================================================
     case CHECK_MAP:
       cv = co = 0;
+      if (++rs.nav_retry > 4) {
+        if ((unsigned)rs.saved_gc < (unsigned)GRID_W &&
+            (unsigned)rs.saved_gr < (unsigned)GRID_H)
+          grid[rs.saved_gr][rs.saved_gc].status = 2;
+        rs.nav_retry = 0;
+      }
       rs.nav_path = findUnvisited(rs.saved_gc, rs.saved_gr);
       if (rs.nav_path.empty()) {
         state = DONE;
@@ -696,8 +704,11 @@ int main() {
                   ty);
       double ang = std::atan2(ty - rs.ry, tx - rs.rx);
       co = KP_T * normAng(ang - yaw);
-      if (std::abs(normAng(ang - yaw)) < TURN_THR)
+      rs.nav_turn_steps++;
+      if (std::abs(normAng(ang - yaw)) < TURN_THR || rs.nav_turn_steps > 100) {
+        rs.nav_turn_steps = 0;
         state = NAV_FORWARD;
+      }
     } break;
 
     case NAV_FORWARD: {
@@ -712,7 +723,11 @@ int main() {
         state = NAV_BACKUP;
       } else if (std::hypot(tx - rs.rx, ty - rs.ry) < NAV_DIST_THR) {
         rs.path_idx++;
-        state = NAV_TURN;
+        if (rs.path_idx >= rs.nav_path.size()) {
+          state = RESUME_ALIGN;
+        } else {
+          state = NAV_TURN;
+        }
       }
     } break;
 
@@ -721,6 +736,7 @@ int main() {
       if (!bumped) {
         rs.saved_gc = gc;
         rs.saved_gr = gr;
+        rs.resume_heading = rs.row_heading;
         state = CHECK_MAP;
       }
       break;
@@ -731,6 +747,7 @@ int main() {
       co = KP_T * normAng(rs.target_yaw - yaw);
       if (std::abs(normAng(rs.target_yaw - yaw)) < TURN_THR) {
         rs.row_heading = rs.resume_heading;
+        rs.is_recovery = true; // kích hoạt mode recovery
         state = FORWARD;
       }
       break;
