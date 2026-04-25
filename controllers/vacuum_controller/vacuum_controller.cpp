@@ -45,9 +45,9 @@ static constexpr double V_DICH_HANG = 0.18;    // [m/s]  dịch sang hàng mới
 static constexpr double V_DIEU_HUONG = 0.30;   // [m/s]  di chuyển theo BFS
 
 // --- Ngưỡng không gian ---
-static constexpr double KHOANG_DICH_HANG = 0.30; // [m]  độ rộng mỗi dải quét
+static constexpr double KHOANG_DICH_HANG = 0.26; // [m]  độ rộng mỗi dải quét
 static constexpr double NGUONG_VAT_CAN =
-    0.20; // [m]  khoảng cách phát hiện vật cản
+    0.12; // [m]  khoảng cách phát hiện vật cản
 static constexpr double DUNG_TUONG_1 = 0.15;   // [m]  dừng cách tường 1
 static constexpr double DUNG_TUONG_2 = 0.15;   // [m]  dừng cách tường 2
 static constexpr double NGUONG_DEN_NOI = 0.08; // [m]  coi là đã đến điểm BFS
@@ -62,7 +62,7 @@ static constexpr double NGUONG_SAI_SO_GOC =
 static constexpr double DO_SANG_RAD = M_PI / 180.0;
 
 // --- Thông số lưới bản đồ ---
-static constexpr double O_LUOI_KICH_THUOC = 0.20; // [m/ô]
+static constexpr double O_LUOI_KICH_THUOC = 0.26; // [m/ô]
 static constexpr int LUOI_SO_COT = 100;
 static constexpr int LUOI_SO_HANG = 100;
 static constexpr int LUOI_DICH_COT = 50;  // gốc tọa độ lưới (cột)
@@ -431,13 +431,10 @@ int main() {
     the_gioi_ra_luoi(rs.vi_tri_x, rs.vi_tri_y, gc, gr);
 
     // Đánh dấu ô robot đứng và 8 ô xung quanh là "đã thăm"
-    for (int di = -1; di <= 1; di++) {
-      for (int dj = -1; dj <= 1; dj++) {
-        int hc = gc + di, hr = gr + dj;
-        if ((unsigned)hc < (unsigned)LUOI_SO_COT &&
-            (unsigned)hr < (unsigned)LUOI_SO_HANG &&
-            ban_do[hr][hc].trang_thai != 2)
-          ban_do[hr][hc].trang_thai = 1;
+    if ((unsigned)gc < (unsigned)LUOI_SO_COT &&
+        (unsigned)gr < (unsigned)LUOI_SO_HANG) {
+      if (ban_do[gr][gc].trang_thai != 2) {
+        ban_do[gr][gc].trang_thai = 1;
       }
     }
     cap_nhat_ban_do(anh_lidar, rs.vi_tri_x, rs.vi_tri_y, yaw, van_toc_goc);
