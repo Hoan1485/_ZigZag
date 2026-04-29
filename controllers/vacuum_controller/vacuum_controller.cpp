@@ -45,9 +45,9 @@ static constexpr double V_DICH_HANG = 0.18;    // [m/s]  dịch sang hàng mới
 static constexpr double V_DIEU_HUONG = 0.30;   // [m/s]  di chuyển theo BFS
 
 // --- Ngưỡng không gian ---
-static constexpr double KHOANG_DICH_HANG = 0.26; // [m]  độ rộng mỗi dải quét
-static constexpr double NGUONG_VAT_CAN =
-    0.12; // [m]  khoảng cách phát hiện vật cản
+static constexpr double KHOANG_DICH_HANG = 0.33; // [m]  độ rộng mỗi dải quét
+static constexpr double NGUONG_VAT_CAN = 0.12;
+
 static constexpr double DUNG_TUONG_1 = 0.15;   // [m]  dừng cách tường 1
 static constexpr double DUNG_TUONG_2 = 0.15;   // [m]  dừng cách tường 2
 static constexpr double NGUONG_DEN_NOI = 0.08; // [m]  coi là đã đến điểm BFS
@@ -62,11 +62,11 @@ static constexpr double NGUONG_SAI_SO_GOC =
 static constexpr double DO_SANG_RAD = M_PI / 180.0;
 
 // --- Thông số lưới bản đồ ---
-static constexpr double O_LUOI_KICH_THUOC = 0.26; // [m/ô]
-static constexpr int LUOI_SO_COT = 100;
-static constexpr int LUOI_SO_HANG = 100;
-static constexpr int LUOI_DICH_COT = 50;  // gốc tọa độ lưới (cột)
-static constexpr int LUOI_DICH_HANG = 50; // gốc tọa độ lưới (hàng)
+static constexpr double O_LUOI_KICH_THUOC = 0.33; // [m/ô]
+static constexpr int LUOI_SO_COT = 15;
+static constexpr int LUOI_SO_HANG = 15;
+static constexpr int LUOI_DICH_COT = 8;  // gốc tọa độ lưới (cột)
+static constexpr int LUOI_DICH_HANG = 8; // gốc tọa độ lưới (hàng)
 
 // ============================================================
 //  CẤU TRÚC DỮ LIỆU
@@ -79,7 +79,7 @@ struct OLuoi {
 };
 
 // Bản đồ lưới toàn cục
-static OLuoi ban_do[LUOI_SO_HANG][LUOI_SO_COT];
+static OLuoi ban_do[LUOI_SO_HANG][LUOI_SO_COT] = {};
 
 // Tọa độ một ô lưới (hệ số nguyên)
 struct DiemLuoi {
@@ -137,7 +137,8 @@ struct TrangThaiRobot {
   double goc_tuong_1 = 0.0;    // hướng về phía tường đầu tiên
 
   // Thông số Phase 1
-  int chieu_tuong_2 = 1; // +1 hoặc -1: chiều quay tìm tường 2
+  int chieu_tuong_2 = 1;      // +1 hoặc -1: chiều quay tìm tường 2
+  double thoi_gian_cho = 0.0; // Thời gian chờ (s)
 
   // Thông số zigzag
   double dich_bat_dau_x = 0.0;
@@ -458,6 +459,13 @@ int main() {
 
     // Quét toàn bộ 360° LiDAR, tìm hướng về tường gần nhất
     case QUET_360: {
+      cv = 0.0;
+      co = 0.0;
+      rs.thoi_gian_cho += dt;
+      if (rs.thoi_gian_cho < 2.0) {
+        break; // Đứng yên chờ đủ 2s để cập nhật bản đồ LiDAR
+      }
+
       float kc_nho_nhat = 99.0f;
       int goc_nho_nhat = 0;
       for (int i = 0; i < 360; i++) {
@@ -502,7 +510,7 @@ int main() {
     case TIM_TUONG_2: {
       float kc_phai = lidar_trung_binh(anh_lidar, 80, 100);
       float kc_trai = lidar_trung_binh(anh_lidar, 260, 280);
-      rs.chieu_tuong_2 = (kc_phai <= kc_trai) ? +1 : -1;
+      rs.chieu_tuong_2 = (kc_phai <= kc_trai) ? -1 : 1;
       rs.goc_muc_tieu = chuan_hoa_goc(yaw + rs.chieu_tuong_2 * M_PI * 0.5);
       trang_thai = QUAY_VE_TUONG_2;
     } break;
