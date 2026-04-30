@@ -80,6 +80,6 @@ Dự án là nền tảng tiền đề để phát triển mở rộng các tín
 
 📄 Bản quyền & Tác giả
 
-Phát triển bởi: [Tên của bạn]
+Phát triển bởi: [Nguyễn Văn Hoàn]
 
 Dự án phục vụ cho mục đích Nghiên cứu Khoa học và học tập.
