@@ -11,16 +11,16 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 WorldInfo {
 }
 Viewpoint {
-  orientation -0.4507825837043582 0.5187626622366746 0.7264161083689851 1.7490225341591419
-  position -0.44068998328690345 -6.496276035820755 11.998896039445786
+  orientation -0.5618573128235408 0.5675042815835308 0.6018764411497349 2.04914409928439
+  position 1.9954793124942414 -1.382592790476413 17.338565120320286
 }
 TexturedBackground {
 }
 TexturedBackgroundLight {
 }
 DEF ZigZag_VaCham RectangleArena {
-  floorSize 5 5
-  floorTileSize 5 5
+  floorSize 5.1 5.1
+  floorTileSize 5.1 5.1
   floorAppearance Parquetry {
     type "light strip"
     IBLStrength 0
@@ -28,16 +28,8 @@ DEF ZigZag_VaCham RectangleArena {
   wallHeight 0.2
 }
 Create {
-  hidden position_0_0 2140.245598992657
-  hidden position_0_1 2112.292378576781
-  hidden rotation_10 0 1 0 3.9625945515976486
-  hidden rotation_11 0 1 0 1.1421153644401187
-  hidden translation_15 0.000925915030615343 9.242622601712824e-07 -0.0007922992370894277
-  hidden rotation_15 0.8442481911069557 -0.3789751089371974 -0.37897606602353207 1.7393139900873427
-  hidden translation_16 0.0009252509074497706 1.7901252824525926e-07 -0.0007920064518024683
-  hidden rotation_16 0.3025419984274792 -0.6739659668696208 -0.6739719687709603 2.5540290270534696
   translation -1.13737 -0.921002 0.0444107
-  rotation 0.0005346861873684796 -4.2223568438063635e-07 0.9999998570552411 3.13364999984478
+  rotation 0 0 1 3.13364999984478
   controller "vacuum_controller"
   bodySlot [
     Pen {
@@ -47,12 +39,13 @@ Create {
     }
     RobotisLds01 {
       translation 0.05 0 0.05
-      rotation 0 0 1 3.14159
+      rotation 0 0 1 3.141592653589793
     }
     InertialUnit {
     }
   ]
 }
 WoodenBox {
-  translation 0.87 0 0.3
+  translation 1.09 0 0.3
+  size 0.8 1 0.6
 }

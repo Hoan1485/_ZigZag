@@ -45,11 +45,12 @@ static constexpr double V_DICH_HANG = 0.18;    // [m/s]  dịch sang hàng mới
 static constexpr double V_DIEU_HUONG = 0.30;   // [m/s]  di chuyển theo BFS
 
 // --- Ngưỡng không gian ---
-static constexpr double KHOANG_DICH_HANG = 0.33; // [m]  độ rộng mỗi dải quét
+static constexpr double KHOANG_DICH_HANG =
+    1.0 / 3.0; // [m]  độ rộng mỗi dải quét
 static constexpr double NGUONG_VAT_CAN = 0.12;
 
-static constexpr double DUNG_TUONG_1 = 0.15;   // [m]  dừng cách tường 1
-static constexpr double DUNG_TUONG_2 = 0.15;   // [m]  dừng cách tường 2
+static constexpr double DUNG_TUONG_1 = 0.20;   // [m]  dừng cách tường 1
+static constexpr double DUNG_TUONG_2 = 0.12;   // [m]  dừng cách tường 2
 static constexpr double NGUONG_DEN_NOI = 0.08; // [m]  coi là đã đến điểm BFS
 
 // --- Tham số bộ điều khiển ---
@@ -62,11 +63,11 @@ static constexpr double NGUONG_SAI_SO_GOC =
 static constexpr double DO_SANG_RAD = M_PI / 180.0;
 
 // --- Thông số lưới bản đồ ---
-static constexpr double O_LUOI_KICH_THUOC = 0.33; // [m/ô]
+static constexpr double O_LUOI_KICH_THUOC = 1.0 / 3.0; // [m/ô]
 static constexpr int LUOI_SO_COT = 15;
 static constexpr int LUOI_SO_HANG = 15;
-static constexpr int LUOI_DICH_COT = 8;  // gốc tọa độ lưới (cột)
-static constexpr int LUOI_DICH_HANG = 8; // gốc tọa độ lưới (hàng)
+static constexpr int LUOI_DICH_COT = 7;  // gốc tọa độ lưới (cột)
+static constexpr int LUOI_DICH_HANG = 7; // gốc tọa độ lưới (hàng)
 
 // ============================================================
 //  CẤU TRÚC DỮ LIỆU
@@ -152,6 +153,7 @@ struct TrangThaiRobot {
   vector<DiemLuoi> duong_di; // đường đi BFS đến ô chưa thăm
   size_t chi_so = 0;
   bool dang_phuc_hoi = false;
+  int dem_quay = 0;
 };
 
 // ============================================================
@@ -241,7 +243,7 @@ static void cap_nhat_ban_do(const float *anh, double rx, double ry,
 
   for (int i = 0; i < 360; i += 5) {
     float kc = anh[i];
-    if (kc <= 0.05f || kc >= 2.0f)
+    if (kc <= 0.05f || kc >= 0.50f)
       continue; // ngoài tầm hữu ích
 
     // Tọa độ thế giới của điểm phản xạ
@@ -278,7 +280,7 @@ vector<DiemLuoi> tim_o_chua_tham(int cot_dau, int hang_dau) {
     return {};
 
   // Mảng lưu cha (index 1D) để truy vết đường đi
-  static int cha[LUOI_SO_HANG * LUOI_SO_COT];
+  int cha[LUOI_SO_HANG * LUOI_SO_COT];
   fill(cha, cha + LUOI_SO_HANG * LUOI_SO_COT, -1);
 
   auto chi_so_1d = [](int c, int h) { return h * LUOI_SO_COT + c; };
@@ -438,7 +440,11 @@ int main() {
         ban_do[gr][gc].trang_thai = 1;
       }
     }
-    cap_nhat_ban_do(anh_lidar, rs.vi_tri_x, rs.vi_tri_y, yaw, van_toc_goc);
+
+    // Chỉ cập nhật bản đồ bằng Lidar khi đang đi thẳng trong quá trình zigzag
+    if (trang_thai == TIEN) {
+      cap_nhat_ban_do(anh_lidar, rs.vi_tri_x, rs.vi_tri_y, yaw, van_toc_goc);
+    }
 
     // Phát hiện va chạm qua bumper
     const bool va_cham = (bumper_trai && bumper_trai->getValue() > 0.5) ||
@@ -483,8 +489,12 @@ int main() {
     // Quay về hướng tường thứ nhất
     case QUAY_VE_TUONG_1:
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC)
+      rs.dem_quay++;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
+          rs.dem_quay > 100) {
+        rs.dem_quay = 0;
         trang_thai = TIEN_DEN_TUONG_1;
+      }
       break;
 
     // Tiến thẳng đến tường thứ nhất
@@ -518,8 +528,12 @@ int main() {
     // Quay về hướng tường thứ hai
     case QUAY_VE_TUONG_2:
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC)
+      rs.dem_quay++;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
+          rs.dem_quay > 100) {
+        rs.dem_quay = 0;
         trang_thai = TIEN_DEN_TUONG_2;
+      }
       break;
 
     // Tiến đến tường thứ hai
@@ -546,7 +560,9 @@ int main() {
       double goc_gan_nhat = round(yaw / (M_PI * 0.5)) * (M_PI * 0.5);
       double sai_so = chuan_hoa_goc(goc_gan_nhat - yaw);
       co = KP_QUAY * sai_so;
-      if (abs(sai_so) < NGUONG_SAI_SO_GOC) {
+      rs.dem_quay++;
+      if (abs(sai_so) < NGUONG_SAI_SO_GOC || rs.dem_quay > 100) {
+        rs.dem_quay = 0;
         // Lưu hướng hàng zigzag (ngược lại 180°)
         rs.goc_muc_tieu = rs.huong_hang = rs.huong_goc =
             chuan_hoa_goc(yaw + sai_so + M_PI);
@@ -562,7 +578,10 @@ int main() {
     // ------------------------------------------------------------
     case QUAY_180:
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
+      rs.dem_quay++;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
+          rs.dem_quay > 150) {
+        rs.dem_quay = 0;
         printf("[Phase 2 → 3] Bắt đầu quét ZigZag!\n");
         trang_thai = TIEN;
       }
@@ -620,9 +639,19 @@ int main() {
     // Quay 90° sang hướng hàng kế tiếp
     case QUAY_1:
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
+      rs.dem_quay++;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
+          rs.dem_quay > 100) {
+        rs.dem_quay = 0;
         if (lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN) {
           // Bị chặn ngay khi quay xong → chuyển BFS
+          int oc, oh;
+          the_gioi_ra_luoi(rs.vi_tri_x + 0.15 * cos(yaw),
+                           rs.vi_tri_y + 0.15 * sin(yaw), oc, oh);
+          if ((unsigned)oc < (unsigned)LUOI_SO_COT &&
+              (unsigned)oh < (unsigned)LUOI_SO_HANG) {
+            ban_do[oh][oc].trang_thai = 2;
+          }
           rs.dich_bi_chan = true;
           rs.huong_tiep_tuc = rs.huong_hang;
           rs.luu_cot = gc;
@@ -664,10 +693,20 @@ int main() {
     // Quay 90° lần 2 để quay lại hướng chạy hàng
     case QUAY_2:
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
+      rs.dem_quay++;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
+          rs.dem_quay > 100) {
+        rs.dem_quay = 0;
         rs.huong_hang = rs.goc_muc_tieu;
         rs.chieu_queo *= -1; // đổi chiều queo để hình thành chữ S
         if (lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN) {
+          int oc, oh;
+          the_gioi_ra_luoi(rs.vi_tri_x + 0.15 * cos(yaw),
+                           rs.vi_tri_y + 0.15 * sin(yaw), oc, oh);
+          if ((unsigned)oc < (unsigned)LUOI_SO_COT &&
+              (unsigned)oh < (unsigned)LUOI_SO_HANG) {
+            ban_do[oh][oc].trang_thai = 2;
+          }
           rs.huong_tiep_tuc = rs.huong_hang;
           rs.luu_cot = gc;
           rs.luu_hang = gr;
@@ -702,8 +741,12 @@ int main() {
                        tx, ty);
       double goc_den = atan2(ty - rs.vi_tri_y, tx - rs.vi_tri_x);
       co = KP_QUAY * chuan_hoa_goc(goc_den - yaw);
-      if (abs(chuan_hoa_goc(goc_den - yaw)) < NGUONG_SAI_SO_GOC)
+      rs.dem_quay++;
+      if (abs(chuan_hoa_goc(goc_den - yaw)) < NGUONG_SAI_SO_GOC ||
+          rs.dem_quay > 100) {
+        rs.dem_quay = 0;
         trang_thai = DH_TIEN;
+      }
     } break;
 
     // Tiến đến điểm BFS tiếp theo
@@ -716,6 +759,13 @@ int main() {
       co = KP_GIU_THANG * chuan_hoa_goc(goc_den - yaw);
 
       if (va_cham || lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN) {
+        int oc, oh;
+        the_gioi_ra_luoi(rs.vi_tri_x + 0.15 * cos(yaw),
+                         rs.vi_tri_y + 0.15 * sin(yaw), oc, oh);
+        if ((unsigned)oc < (unsigned)LUOI_SO_COT &&
+            (unsigned)oh < (unsigned)LUOI_SO_HANG) {
+          ban_do[oh][oc].trang_thai = 2;
+        }
         trang_thai = DH_LUI;
         break;
       }
@@ -763,7 +813,10 @@ int main() {
       cv = 0;
       rs.goc_muc_tieu = rs.huong_tiep_tuc;
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
+      rs.dem_quay++;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
+          rs.dem_quay > 100) {
+        rs.dem_quay = 0;
         rs.huong_hang = rs.huong_tiep_tuc;
         trang_thai = TIEN;
       }
