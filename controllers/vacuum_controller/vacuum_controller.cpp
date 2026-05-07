@@ -9,6 +9,7 @@
 //    Phase 4 – Điều hướng BFS + phục hồi (KIEM_TRA_BAN_DO … CAN_LAI_HUONG)
 // ============================================================
 
+#include <webots/GPS.hpp>
 #include <webots/InertialUnit.hpp>
 #include <webots/Lidar.hpp>
 #include <webots/Motor.hpp>
@@ -21,7 +22,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <queue>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using namespace webots;
@@ -47,18 +53,17 @@ static constexpr double V_DIEU_HUONG = 0.30;   // [m/s]  di chuyển theo BFS
 // --- Ngưỡng không gian ---
 static constexpr double KHOANG_DICH_HANG =
     1.0 / 3.0; // [m]  độ rộng mỗi dải quét
-static constexpr double NGUONG_VAT_CAN = 0.12;
-
+static constexpr double NGUONG_VAT_CAN =
+    0.12; // [m]  khoảng cách phát hiện vật cản
 static constexpr double DUNG_TUONG_1 = 0.20;   // [m]  dừng cách tường 1
-static constexpr double DUNG_TUONG_2 = 0.12;   // [m]  dừng cách tường 2
+static constexpr double DUNG_TUONG_2 = 0.15;   // [m]  dừng cách tường 2
 static constexpr double NGUONG_DEN_NOI = 0.08; // [m]  coi là đã đến điểm BFS
 
 // --- Tham số bộ điều khiển ---
 static constexpr double KP_GIU_THANG = 4.5; // Hệ số P giữ thẳng hướng
-static constexpr double KP_QUAY = 5.5;      // Hệ số P điều khiển góc quay
+static constexpr double KP_QUAY = 5.5;      // 20 Hệ số P điều khiển góc quay
 static constexpr double NGUONG_SAI_SO_GOC =
     0.012; // [rad]  sai số góc chấp nhận được
-
 // --- Hệ số chuyển đổi ---
 static constexpr double DO_SANG_RAD = M_PI / 180.0;
 
@@ -66,12 +71,8 @@ static constexpr double DO_SANG_RAD = M_PI / 180.0;
 static constexpr double O_LUOI_KICH_THUOC = 1.0 / 3.0; // [m/ô]
 static constexpr int LUOI_SO_COT = 15;
 static constexpr int LUOI_SO_HANG = 15;
-static constexpr int LUOI_DICH_COT = 7;  // gốc tọa độ lưới (cột)
-static constexpr int LUOI_DICH_HANG = 7; // gốc tọa độ lưới (hàng)
-
-// ============================================================
-//  CẤU TRÚC DỮ LIỆU
-// ============================================================
+static constexpr int LUOI_DICH_COT = 8;  // gốc tọa độ lưới (cột)
+static constexpr int LUOI_DICH_HANG = 8; // gốc tọa độ lưới (hàng)
 
 // Một ô trong lưới bản đồ
 struct OLuoi {
@@ -80,8 +81,336 @@ struct OLuoi {
 };
 
 // Bản đồ lưới toàn cục
-static OLuoi ban_do[LUOI_SO_HANG][LUOI_SO_COT] = {};
+static OLuoi ban_do[LUOI_SO_HANG][LUOI_SO_COT];
 
+// ============================================================
+//  HỆ THỐNG HIỂN THỊ TRẠNG THÁI REALTIME (ANSI DASHBOARD)
+// ============================================================
+
+// --- ANSI escape codes ---
+// Lưu/khôi phục vị trí con trỏ, xóa dòng, màu sắc
+#define ANSI_SAVE "\033[s"
+#define ANSI_RESTORE "\033[u"
+#define ANSI_CLEAR_EOL "\033[K"
+#define ANSI_UP(n) "\033[" #n "A"
+#define ANSI_BOLD "\033[1m"
+#define ANSI_RESET "\033[0m"
+#define ANSI_CYAN "\033[36m"
+#define ANSI_GREEN "\033[32m"
+#define ANSI_YELLOW "\033[33m"
+#define ANSI_RED "\033[31m"
+#define ANSI_MAGENTA "\033[35m"
+#define ANSI_WHITE "\033[37m"
+
+// Số dòng dashboard chiếm (để cuộn ngược lại đúng)
+// Gồm: header(1) + trạng thái(1) + vị trí(1) + yaw(1) + ô lưới(1)
+//     + lidar(1) + bản đồ(HANG+2) + separator(1) = 9 + LUOI_SO_HANG
+static constexpr int DASHBOARD_DONG_TRANG_THAI = 8; // dòng trước bản đồ
+static constexpr int DASHBOARD_TONG_DONG =
+    DASHBOARD_DONG_TRANG_THAI + LUOI_SO_HANG + 2; // +header hàng + footer
+
+// Bộ đếm bước toàn cục
+static int g_buoc = 0;
+
+// Theo dõi xem dashboard đã được vẽ lần đầu chưa
+static bool g_dashboard_da_ve = false;
+
+// --- Tên trạng thái FSM (để in ra màn hình) ---
+static const char *ten_trang_thai(int tt) {
+  switch (tt) {
+  case 0:
+    return "QUET_360";
+  case 1:
+    return "QUAY_VE_TUONG_1";
+  case 2:
+    return "TIEN_DEN_TUONG_1";
+  case 3:
+    return "LUI_1";
+  case 4:
+    return "TIM_TUONG_2";
+  case 5:
+    return "QUAY_VE_TUONG_2";
+  case 6:
+    return "TIEN_DEN_TUONG_2";
+  case 7:
+    return "LUI_2";
+  case 8:
+    return "CAN_CHINH_GOC";
+  case 9:
+    return "QUAY_180";
+  case 10:
+    return "TIEN (ZigZag)";
+  case 11:
+    return "LUI (ZigZag)";
+  case 12:
+    return "QUAY_1";
+  case 13:
+    return "DICH_HANG";
+  case 14:
+    return "QUAY_2";
+  case 15:
+    return "KIEM_TRA_BAN_DO";
+  case 16:
+    return "DH_QUAY";
+  case 17:
+    return "DH_TIEN";
+  case 18:
+    return "DH_LUI";
+  case 19:
+    return "CAN_LAI_HUONG";
+  case 20:
+    return "HOAN_THANH";
+  default:
+    return "UNKNOWN";
+  }
+}
+
+// Forward declarations (định nghĩa đầy đủ ở phía dưới)
+static inline float lidar_tai(const float *anh, int goc);
+static float lidar_trung_binh(const float *anh, int goc_dau, int goc_cuoi);
+
+/**
+ * Di chuyển con trỏ lên n dòng và về đầu dòng (để vẽ đè dashboard).
+ * Chỉ gọi sau khi dashboard đã được vẽ ít nhất một lần.
+ */
+static inline void di_chuyen_len_dau_dashboard() {
+  // ESC[nA = di lên n dòng, \r = về đầu dòng
+  cout << "\033[" << DASHBOARD_TONG_DONG << "A\r";
+}
+
+/**
+ * In một dòng dashboard có xóa phần thừa cuối dòng (ANSI_CLEAR_EOL).
+ */
+static inline void dong_dashboard(const string &noi_dung) {
+  cout << noi_dung << ANSI_CLEAR_EOL << "\n";
+}
+
+/**
+ * Vẽ toàn bộ dashboard realtime lên terminal.
+ * Gọi mỗi bước – sẽ vẽ đè lên vị trí cũ (không cuộn).
+ */
+static void ve_dashboard(int trang_thai_fsm, double x, double y, double yaw,
+                         int gc, int gr, bool va_cham, const float *anh_lidar,
+                         const OLuoi ban_do[][LUOI_SO_COT]) {
+  // --- Lần đầu: in đủ dòng trống để chiếm chỗ ---
+  if (!g_dashboard_da_ve) {
+    for (int i = 0; i < DASHBOARD_TONG_DONG; i++)
+      cout << "\n";
+    g_dashboard_da_ve = true;
+  }
+
+  // Quay lên đầu vùng dashboard
+  di_chuyen_len_dau_dashboard();
+
+  // ── Dòng 1: Header ──────────────────────────────────────────
+  {
+    ostringstream s;
+    s << ANSI_BOLD << ANSI_CYAN << "══ ROBOT HUT BUI │ Buoc:" << setw(6)
+      << g_buoc << " ══" << ANSI_RESET;
+    dong_dashboard(s.str());
+  }
+
+  // ── Dòng 2: Trạng thái FSM ──────────────────────────────────
+  {
+    // Chọn màu theo phase
+    const char *mau = ANSI_WHITE;
+    if (trang_thai_fsm <= 8)
+      mau = ANSI_YELLOW; // Phase 1
+    else if (trang_thai_fsm == 9)
+      mau = ANSI_MAGENTA; // Phase 2
+    else if (trang_thai_fsm <= 14)
+      mau = ANSI_GREEN; // Phase 3
+    else if (trang_thai_fsm <= 19)
+      mau = ANSI_CYAN; // Phase 4
+    else
+      mau = ANSI_WHITE; // HOAN_THANH
+
+    ostringstream s;
+    s << "  FSM: " << mau << ANSI_BOLD << left << setw(20)
+      << ten_trang_thai(trang_thai_fsm) << ANSI_RESET;
+    if (va_cham)
+      s << ANSI_RED << ANSI_BOLD << " [!! VA CHAM !!]" << ANSI_RESET;
+    dong_dashboard(s.str());
+  }
+
+  // ── Dòng 3: Vị trí X, Y ─────────────────────────────────────
+  {
+    ostringstream s;
+    s << "  Vi tri : X=" << ANSI_GREEN << fixed << setprecision(4) << setw(8)
+      << x << ANSI_RESET << " m   Y=" << ANSI_GREEN << setw(8) << y
+      << ANSI_RESET << " m";
+    dong_dashboard(s.str());
+  }
+
+  // ── Dòng 4: Yaw ─────────────────────────────────────────────
+  {
+    double yaw_deg = yaw * 180.0 / M_PI;
+    ostringstream s;
+    s << "  Yaw    : " << ANSI_YELLOW << fixed << setprecision(2) << setw(8)
+      << yaw_deg << ANSI_RESET << " deg"
+      << "  (" << setw(7) << setprecision(4) << yaw << " rad)";
+    dong_dashboard(s.str());
+  }
+
+  // ── Dòng 5: Ô lưới ──────────────────────────────────────────
+  {
+    ostringstream s;
+    s << "  O luoi : Col=" << ANSI_CYAN << setw(3) << gc << ANSI_RESET
+      << "  Row=" << ANSI_CYAN << setw(3) << gr << ANSI_RESET;
+    dong_dashboard(s.str());
+  }
+
+  // ── Dòng 6: Separator ───────────────────────────────────────
+  dong_dashboard("  ─────────────────────────────────────────");
+
+  // ── Dòng 7: LiDAR 4 hướng ───────────────────────────────────
+  {
+    // Tính khoảng cách 4 hướng
+    float phia_truoc = lidar_trung_binh(anh_lidar, 355, 360);
+    float tmp2 = lidar_trung_binh(anh_lidar, 0, 5);
+    phia_truoc = (phia_truoc < 9.0f && tmp2 < 9.0f) ? (phia_truoc + tmp2) * 0.5f
+                 : (phia_truoc < 9.0f)              ? phia_truoc
+                                                    : tmp2;
+    float phia_phai = lidar_trung_binh(anh_lidar, 85, 95);
+    float phia_sau = lidar_trung_binh(anh_lidar, 175, 185);
+    float phia_trai = lidar_trung_binh(anh_lidar, 265, 275);
+
+    auto mau_kc = [](float d) -> const char * {
+      return (d < 0.20f) ? ANSI_RED : (d < 0.50f) ? ANSI_YELLOW : ANSI_GREEN;
+    };
+
+    ostringstream s;
+    s << "  LiDAR  : T=" << mau_kc(phia_truoc) << fixed << setprecision(3)
+      << setw(5) << phia_truoc << ANSI_RESET << "m P=" << mau_kc(phia_phai)
+      << setw(5) << phia_phai << ANSI_RESET << "m S=" << mau_kc(phia_sau)
+      << setw(5) << phia_sau << ANSI_RESET << "m Tr=" << mau_kc(phia_trai)
+      << setw(5) << phia_trai << ANSI_RESET << "m";
+    dong_dashboard(s.str());
+  }
+
+  // ── Dòng 8: Thống kê bản đồ ─────────────────────────────────
+  {
+    int da_tham = 0, chua_tham = 0, vat_can = 0;
+    for (int h = 0; h < LUOI_SO_HANG; h++)
+      for (int c = 0; c < LUOI_SO_COT; c++) {
+        switch (ban_do[h][c].trang_thai) {
+        case 0:
+          chua_tham++;
+          break;
+        case 1:
+          da_tham++;
+          break;
+        case 2:
+          vat_can++;
+          break;
+        }
+      }
+    int tong = LUOI_SO_HANG * LUOI_SO_COT;
+    double pct = 100.0 * da_tham / tong;
+
+    // Thanh tiến trình ASCII (20 ký tự)
+    int filled = (int)(pct / 5.0);
+    string thanh = "[" + string(filled, '#') + string(20 - filled, '.') + "]";
+
+    ostringstream s;
+    s << "  Ban do : " << ANSI_GREEN << thanh << ANSI_RESET << " " << ANSI_BOLD
+      << fixed << setprecision(1) << pct << "%" << ANSI_RESET
+      << "  Đã thăm: " << da_tham << " Chưa thăm: " << chua_tham
+      << " Vật cản: " << vat_can;
+    dong_dashboard(s.str());
+  }
+
+  // ── Bản đồ mini ─────────────────────────────────────────────
+  // 1. Header cột (In hàng chục)
+  {
+    ostringstream s;
+    s << "  "; // Khoảng trống lề trái
+    for (int c = 0; c < LUOI_SO_COT; c++) {
+      if (c >= 10)
+        s << (c / 10) << " ";
+      else
+        s << "  "; // Nếu < 10 thì in khoảng trống để giữ hàng
+    }
+    dong_dashboard(s.str());
+  }
+
+  // 2. Header cột (In hàng đơn vị)
+  {
+    ostringstream s;
+    s << "  ";
+    for (int c = 0; c < LUOI_SO_COT; c++) {
+      s << (c % 10) << " ";
+    }
+    dong_dashboard(s.str());
+  }
+
+  // 3. Vẽ nội dung bản đồ
+  for (int h = LUOI_SO_HANG - 1; h >= 0; h--) {
+    ostringstream s;
+    s << "  ";
+    for (int c = 0; c < LUOI_SO_COT; c++) {
+      if (c == gc && h == gr) {
+        s << ANSI_BOLD << ANSI_MAGENTA << "R " << ANSI_RESET;
+        continue;
+      }
+      switch (ban_do[h][c].trang_thai) {
+      case 0:
+        s << "0 ";
+        break;
+      case 1:
+        s << ANSI_GREEN << "1 " << ANSI_RESET;
+        break;
+      case 2:
+        s << ANSI_RED << "2 " << ANSI_RESET;
+        break;
+      default:
+        s << "? ";
+        break;
+      }
+    }
+    s << " |" << setw(2) << h; // Chỉ số hàng bên phải
+    dong_dashboard(s.str());
+  }
+
+  // Footer
+  dong_dashboard("  ─────────────────────────────────────────");
+
+  cout.flush();
+}
+
+/**
+ * Lấy giá trị LiDAR tại góc [goc] độ (0–359).
+ * Trả về 9.9 nếu dữ liệu không hợp lệ (inf, nan, quá gần).
+ */
+static inline float lidar_tai(const float *anh, int goc) {
+  int vi_tri = ((goc % 360) + 360) % 360;
+  float d = anh[vi_tri];
+  return (d < 0.01f || isinf(d) || isnan(d)) ? 9.9f : d;
+}
+
+/**
+ * Tính trung bình các giá trị LiDAR trong phạm vi [goc_dau, goc_cuoi].
+ * Bỏ qua các giá trị không hợp lệ (≥ 9.0).
+ */
+static float lidar_trung_binh(const float *anh, int goc_dau, int goc_cuoi) {
+  float tong = 0.0f;
+  int dem = 0;
+  for (int g = goc_dau; g <= goc_cuoi; g++) {
+    float v = lidar_tai(anh, g);
+    if (v < 9.0f) {
+      tong += v;
+      dem++;
+    }
+  }
+  return (dem > 0) ? tong / dem : 9.9f;
+}
+
+/**
+ * Vẽ bản đồ lưới mini ra console:
+ *   '0' = chưa thăm (0)
+ *   '1' = đã thăm   (1)
+ *   '2' = vật cản (2)
+ */
 // Tọa độ một ô lưới (hệ số nguyên)
 struct DiemLuoi {
   int cot, hang;
@@ -138,8 +467,7 @@ struct TrangThaiRobot {
   double goc_tuong_1 = 0.0;    // hướng về phía tường đầu tiên
 
   // Thông số Phase 1
-  int chieu_tuong_2 = 1;      // +1 hoặc -1: chiều quay tìm tường 2
-  double thoi_gian_cho = 0.0; // Thời gian chờ (s)
+  int chieu_tuong_2 = 1; // +1 hoặc -1: chiều quay tìm tường 2
 
   // Thông số zigzag
   double dich_bat_dau_x = 0.0;
@@ -153,7 +481,6 @@ struct TrangThaiRobot {
   vector<DiemLuoi> duong_di; // đường đi BFS đến ô chưa thăm
   size_t chi_so = 0;
   bool dang_phuc_hoi = false;
-  int dem_quay = 0;
 };
 
 // ============================================================
@@ -190,33 +517,6 @@ static void dieu_khien_vi_sai(double v_tien, double v_goc, Motor *dc_trai,
 }
 
 /**
- * Lấy giá trị LiDAR tại góc [goc] độ (0–359).
- * Trả về 9.9 nếu dữ liệu không hợp lệ (inf, nan, quá gần).
- */
-static inline float lidar_tai(const float *anh, int goc) {
-  int vi_tri = ((goc % 360) + 360) % 360;
-  float d = anh[vi_tri];
-  return (d < 0.01f || isinf(d) || isnan(d)) ? 9.9f : d;
-}
-
-/**
- * Tính trung bình các giá trị LiDAR trong phạm vi [goc_dau, goc_cuoi].
- * Bỏ qua các giá trị không hợp lệ (≥ 9.0).
- */
-static float lidar_trung_binh(const float *anh, int goc_dau, int goc_cuoi) {
-  float tong = 0.0f;
-  int dem = 0;
-  for (int g = goc_dau; g <= goc_cuoi; g++) {
-    float v = lidar_tai(anh, g);
-    if (v < 9.0f) {
-      tong += v;
-      dem++;
-    }
-  }
-  return (dem > 0) ? tong / dem : 9.9f;
-}
-
-/**
  * Chuyển tọa độ thế giới (m) → chỉ số ô lưới (cột, hàng).
  */
 static void the_gioi_ra_luoi(double x, double y, int &cot, int &hang) {
@@ -243,7 +543,7 @@ static void cap_nhat_ban_do(const float *anh, double rx, double ry,
 
   for (int i = 0; i < 360; i += 5) {
     float kc = anh[i];
-    if (kc <= 0.05f || kc >= 0.50f)
+    if (kc <= 0.05f || kc >= 2.0f)
       continue; // ngoài tầm hữu ích
 
     // Tọa độ thế giới của điểm phản xạ
@@ -262,11 +562,77 @@ static void cap_nhat_ban_do(const float *anh, double rx, double ry,
       continue; // ô đã là vật cản – bỏ qua
 
     // Tích lũy điểm tin cậy
-    int them = (kc < 1.0f) ? 3 : 1;
+    int them = (kc < 0.5f) ? 2 : 1;
     o.diem_tin = (int8_t)min((int)o.diem_tin + them, 100);
-    if (o.diem_tin > 5)
+    if (o.diem_tin > 50)
       o.trang_thai = 2; // xác nhận là vật cản
   }
+}
+
+/**
+ * Lấp đầy các vùng ô 0 bị bao kín bởi vật cản (2) vào bản đồ.
+ *
+ * Thuật toán:
+ *   1. BFS từ tất cả ô biên không phải vật cản (trang_thai != 2) → đánh dấu
+ *      mọi ô tiếp cận được từ ngoài bằng cờ tạm thời.
+ *   2. Bất kỳ ô 0 nào KHÔNG tiếp cận được từ biên → bị bao kín → đánh dấu = 2.
+ *
+ * Gọi định kỳ (không cần gọi mỗi bước) sau cap_nhat_ban_do().
+ */
+static void lap_day_vung_kin() {
+  // Mảng đánh dấu "tiếp cận được từ biên"
+  bool tiep_can[LUOI_SO_HANG][LUOI_SO_COT];
+  memset(tiep_can, 0, sizeof(tiep_can));
+
+  // Hàng đợi BFS
+  queue<int> hang_doi;
+  auto push_neu_hop_le = [&](int c, int h) {
+    if ((unsigned)c >= (unsigned)LUOI_SO_COT ||
+        (unsigned)h >= (unsigned)LUOI_SO_HANG)
+      return;
+    if (ban_do[h][c].trang_thai == 2)
+      return; // vật cản không thể đi qua
+    if (tiep_can[h][c])
+      return; // đã xử lý
+    tiep_can[h][c] = true;
+    hang_doi.push(h * LUOI_SO_COT + c);
+  };
+
+  // Khởi tạo BFS từ tất cả ô thuộc 4 cạnh biên
+  for (int c = 0; c < LUOI_SO_COT; c++) {
+    push_neu_hop_le(c, 0);
+    push_neu_hop_le(c, LUOI_SO_HANG - 1);
+  }
+  for (int h = 1; h < LUOI_SO_HANG - 1; h++) {
+    push_neu_hop_le(0, h);
+    push_neu_hop_le(LUOI_SO_COT - 1, h);
+  }
+
+  // BFS lan rộng ra toàn bộ vùng tiếp cận được từ biên
+  const int dc[] = {0, 0, -1, 1};
+  const int dh[] = {-1, 1, 0, 0};
+  while (!hang_doi.empty()) {
+    int hien = hang_doi.front();
+    hang_doi.pop();
+    int cc = hien % LUOI_SO_COT;
+    int ch = hien / LUOI_SO_COT;
+    for (int i = 0; i < 4; i++)
+      push_neu_hop_le(cc + dc[i], ch + dh[i]);
+  }
+
+  // Lấp đầy: mọi ô 0 không tiếp cận được từ biên → bị bao kín → đánh dấu = 2
+  int so_lap = 0;
+  for (int h = 0; h < LUOI_SO_HANG; h++) {
+    for (int c = 0; c < LUOI_SO_COT; c++) {
+      if (ban_do[h][c].trang_thai == 0 && !tiep_can[h][c]) {
+        ban_do[h][c].trang_thai = 2;
+        ban_do[h][c].diem_tin = 100; // đánh dấu chắc chắn
+        so_lap++;
+      }
+    }
+  }
+  if (so_lap > 0)
+    printf("[BanDo] Lap day %d o bi bao kin boi vat can.\n", so_lap);
 }
 
 /**
@@ -280,7 +646,7 @@ vector<DiemLuoi> tim_o_chua_tham(int cot_dau, int hang_dau) {
     return {};
 
   // Mảng lưu cha (index 1D) để truy vết đường đi
-  int cha[LUOI_SO_HANG * LUOI_SO_COT];
+  static int cha[LUOI_SO_HANG * LUOI_SO_COT];
   fill(cha, cha + LUOI_SO_HANG * LUOI_SO_COT, -1);
 
   auto chi_so_1d = [](int c, int h) { return h * LUOI_SO_COT + c; };
@@ -370,6 +736,9 @@ int main() {
   Robot *robot = new Robot();
   int buoc_ms = (int)robot->getBasicTimeStep(); // [ms]
 
+  // Lấy thiết bị IMU (đảm bảo tên "inertial unit" khớp với tên trong file .wbt)
+  InertialUnit *imu = robot->getInertialUnit("inertial unit");
+  imu->enable(buoc_ms); // Kích hoạt IMU để đọc dữ liệu cảm biến
   // --- Khởi tạo thiết bị ---
   Motor *dc_trai = robot->getMotor("left wheel motor");
   Motor *dc_phai = robot->getMotor("right wheel motor");
@@ -381,10 +750,39 @@ int main() {
   enc_trai->enable(buoc_ms);
   enc_phai->enable(buoc_ms);
 
+  // GPS để đọc vị trí thực tế ban đầu của robot
+  GPS *gps = robot->getGPS("gps");
+  if (gps)
+    gps->enable(buoc_ms);
+
+  // 2. KHỞI TẠO LIDAR
+  // ============================================================
   Lidar *lidar = robot->getLidar("LDS-01");
-  InertialUnit *imu = robot->getInertialUnit("inertial unit");
+  // Lấy thiết bị LiDAR theo tên đã đặt trong WebotsH
+
   lidar->enable(buoc_ms);
-  imu->enable(buoc_ms);
+  // Kích hoạt LiDAR, cập nhật dữ liệu mỗi buoc_ms ms
+
+  lidar->enablePointCloud();
+  // Bật chế độ Point Cloud: trả về tọa độ (x, y, z) của
+  // từng điểm vật cản so với robot (dùng để visualize)
+
+  // ============================================================
+  // 3. KHỞI TẠO MOTOR QUAY CỤM LIDAR (quét 360°)
+  // ============================================================
+  Motor *lidar_main_motor = robot->getMotor("LDS-01_main_motor");
+  Motor *lidar_secondary_motor = robot->getMotor("LDS-01_secondary_motor");
+
+  if (lidar_main_motor && lidar_secondary_motor) {
+    lidar_main_motor->setPosition(INFINITY);
+    lidar_secondary_motor->setPosition(INFINITY);
+    // INFINITY → chế độ quay liên tục (không dừng ở góc cố định)
+
+    lidar_main_motor->setVelocity(30.0);
+    lidar_secondary_motor->setVelocity(60.0);
+    // Tốc độ quay của cụm LiDAR (rad/s)
+    // Motor phụ quay nhanh gấp đôi để tạo chuyển động quét ổn định
+  }
 
   TouchSensor *bumper_trai = robot->getTouchSensor("bumper_left");
   TouchSensor *bumper_phai = robot->getTouchSensor("bumper_right");
@@ -396,7 +794,40 @@ int main() {
   // --- Khởi tạo FSM ---
   TrangThai trang_thai = QUET_360;
   TrangThaiRobot rs;
-  printf("[Hệ Thống] Khởi động – Phase 1: Tìm góc tường...\n");
+
+  // Đọc vị trí thực tế ban đầu từ GPS (nếu có) để odometry bắt đầu đúng chỗ
+  // Cần step 1 lần để GPS có dữ liệu
+  if (gps) {
+    robot->step(buoc_ms);
+    const double *vi_tri_gps = gps->getValues();
+    if (vi_tri_gps) {
+      rs.vi_tri_x = vi_tri_gps[0]; // Webots GPS: X thế giới
+      rs.vi_tri_y =
+          vi_tri_gps[1]; // Webots GPS: Y thế giới (sàn nhà là mặt phẳng XY)
+      // Khởi tạo encoder để tránh nhảy delta ở bước đầu
+      rs.enc_trai_cu = enc_trai->getValue();
+      rs.enc_phai_cu = enc_phai->getValue();
+      printf("[GPS] Vi tri ban dau: X=%.3f  Y=%.3f\n", rs.vi_tri_x,
+             rs.vi_tri_y);
+    }
+  }
+  cout << "\n╔═══════════════════════════════════════════════════════╗\n"
+       << "║       ROBOT HUT BUI TU DONG - WEBOTS SIMULATION       ║\n"
+       << "╠═══════════════════════════════════════════════════════╣\n"
+       << "║  Kien truc: FSM 4 pha                                 ║\n"
+       << "║  Phase 1 – Tim goc tuong                              ║\n"
+       << "║  Phase 2 – Quay 180° chuan bi quet                    ║\n"
+       << "║  Phase 3 – Quet ZigZag                                ║\n"
+       << "║  Phase 4 – Dieu huong BFS + phuc hoi                  ║\n"
+       << "╠═══════════════════════════════════════════════════════╣\n"
+       << "║  Luoi ban do  : " << LUOI_SO_COT << "x" << LUOI_SO_HANG
+       << " o, kich thuoc o=" << fixed << setprecision(4) << O_LUOI_KICH_THUOC
+       << " m              ║\n"
+       << "║  Buoc thoi gian: " << buoc_ms << " ms"
+       << "                                   ║\n"
+       << "║  Hien thi     : Dashboard realtime (ANSI)             ║\n"
+       << "╚═══════════════════════════════════════════════════════╝\n"
+       << "  [He Thong] Khoi dong – Phase 1: Tim goc tuong...\n\n";
 
   // ============================================================
   //  VÒNG LẶP ĐIỀU KHIỂN CHÍNH
@@ -433,22 +864,51 @@ int main() {
     int gc, gr;
     the_gioi_ra_luoi(rs.vi_tri_x, rs.vi_tri_y, gc, gr);
 
-    // Đánh dấu ô robot đứng và 8 ô xung quanh là "đã thăm"
+    // Đánh dấu ô robot đứng là "đã thăm"
+    // GHI ĐÈ (override): nếu ô hiện tại bị đánh dấu nhầm là vật cản (2)
+    // nhưng robot đang đứng trên đó → chứng tỏ ô có thể đi được → reset về 1
     if ((unsigned)gc < (unsigned)LUOI_SO_COT &&
         (unsigned)gr < (unsigned)LUOI_SO_HANG) {
-      if (ban_do[gr][gc].trang_thai != 2) {
-        ban_do[gr][gc].trang_thai = 1;
+      OLuoi &o_hien_tai = ban_do[gr][gc];
+      if (o_hien_tai.trang_thai == 2) {
+        // Robot đang đứng trên ô bị đánh dấu nhầm là vật cản → ghi đè
+        o_hien_tai.trang_thai = 1;
+        o_hien_tai.diem_tin = 0; // xóa điểm tích lũy để tránh bị đánh dấu lại
+      } else {
+        o_hien_tai.trang_thai = 1;
       }
     }
-
-    // Chỉ cập nhật bản đồ bằng Lidar khi đang đi thẳng trong quá trình zigzag
-    if (trang_thai == TIEN) {
-      cap_nhat_ban_do(anh_lidar, rs.vi_tri_x, rs.vi_tri_y, yaw, van_toc_goc);
+    // GHI ĐÈ waypoint BFS tiếp theo: nếu ô robot sắp đi vào bị đánh dấu nhầm
+    // là vật cản nhưng BFS đã chọn nó → reset để robot có thể đi qua
+    if (rs.dang_phuc_hoi && rs.chi_so < rs.duong_di.size()) {
+      const DiemLuoi &wp = rs.duong_di[rs.chi_so];
+      if ((unsigned)wp.cot < (unsigned)LUOI_SO_COT &&
+          (unsigned)wp.hang < (unsigned)LUOI_SO_HANG) {
+        OLuoi &o_wp = ban_do[wp.hang][wp.cot];
+        if (o_wp.trang_thai == 2) {
+          o_wp.trang_thai = 0; // reset về "chưa thăm" để BFS vẫn đến được
+          o_wp.diem_tin = 0;
+        }
+      }
     }
+    cap_nhat_ban_do(anh_lidar, rs.vi_tri_x, rs.vi_tri_y, yaw, van_toc_goc);
+
+    // Định kỳ lấp đầy các vùng ô 0 bị bao kín bởi vật cản
+    // (chỉ chạy mỗi 50 bước để tránh tốn CPU)
+    if (g_buoc % 50 == 0)
+      lap_day_vung_kin();
 
     // Phát hiện va chạm qua bumper
     const bool va_cham = (bumper_trai && bumper_trai->getValue() > 0.5) ||
                          (bumper_phai && bumper_phai->getValue() > 0.5);
+
+    // ============================================================
+    //  HIỂN THỊ TRẠNG THÁI REALTIME (mỗi bước)
+    // ============================================================
+    g_buoc++;
+
+    ve_dashboard((int)trang_thai, rs.vi_tri_x, rs.vi_tri_y, yaw, gc, gr,
+                 va_cham, anh_lidar, ban_do);
 
     // Đầu ra điều khiển (reset mỗi bước)
     double cv = 0.0; // vận tốc tịnh tiến [m/s]
@@ -465,13 +925,6 @@ int main() {
 
     // Quét toàn bộ 360° LiDAR, tìm hướng về tường gần nhất
     case QUET_360: {
-      cv = 0.0;
-      co = 0.0;
-      rs.thoi_gian_cho += dt;
-      if (rs.thoi_gian_cho < 2.0) {
-        break; // Đứng yên chờ đủ 2s để cập nhật bản đồ LiDAR
-      }
-
       float kc_nho_nhat = 99.0f;
       int goc_nho_nhat = 0;
       for (int i = 0; i < 360; i++) {
@@ -489,12 +942,8 @@ int main() {
     // Quay về hướng tường thứ nhất
     case QUAY_VE_TUONG_1:
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      rs.dem_quay++;
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
-          rs.dem_quay > 100) {
-        rs.dem_quay = 0;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC)
         trang_thai = TIEN_DEN_TUONG_1;
-      }
       break;
 
     // Tiến thẳng đến tường thứ nhất
@@ -520,7 +969,7 @@ int main() {
     case TIM_TUONG_2: {
       float kc_phai = lidar_trung_binh(anh_lidar, 80, 100);
       float kc_trai = lidar_trung_binh(anh_lidar, 260, 280);
-      rs.chieu_tuong_2 = (kc_phai <= kc_trai) ? -1 : 1;
+      rs.chieu_tuong_2 = (kc_phai <= kc_trai) ? +1 : -1;
       rs.goc_muc_tieu = chuan_hoa_goc(yaw + rs.chieu_tuong_2 * M_PI * 0.5);
       trang_thai = QUAY_VE_TUONG_2;
     } break;
@@ -528,12 +977,8 @@ int main() {
     // Quay về hướng tường thứ hai
     case QUAY_VE_TUONG_2:
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      rs.dem_quay++;
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
-          rs.dem_quay > 100) {
-        rs.dem_quay = 0;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC)
         trang_thai = TIEN_DEN_TUONG_2;
-      }
       break;
 
     // Tiến đến tường thứ hai
@@ -560,15 +1005,17 @@ int main() {
       double goc_gan_nhat = round(yaw / (M_PI * 0.5)) * (M_PI * 0.5);
       double sai_so = chuan_hoa_goc(goc_gan_nhat - yaw);
       co = KP_QUAY * sai_so;
-      rs.dem_quay++;
-      if (abs(sai_so) < NGUONG_SAI_SO_GOC || rs.dem_quay > 100) {
-        rs.dem_quay = 0;
+      if (abs(sai_so) < NGUONG_SAI_SO_GOC) {
         // Lưu hướng hàng zigzag (ngược lại 180°)
         rs.goc_muc_tieu = rs.huong_hang = rs.huong_goc =
             chuan_hoa_goc(yaw + sai_so + M_PI);
         rs.chieu_queo = -rs.chieu_tuong_2;
         rs.dich_bi_chan = false;
-        printf("[Phase 1 → 2] Căn góc xong. Quay 180°...\n");
+        cout << "\n[Phase 1 → 2] Can goc xong!"
+             << "  Huong ZigZag=" << fixed << setprecision(2)
+             << (rs.huong_goc * 180.0 / M_PI) << " deg"
+             << "  Chieu queo=" << (rs.chieu_queo > 0 ? "TRAI" : "PHAI")
+             << "  → Quay 180°...\n";
         trang_thai = QUAY_180;
       }
     } break;
@@ -578,11 +1025,10 @@ int main() {
     // ------------------------------------------------------------
     case QUAY_180:
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      rs.dem_quay++;
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
-          rs.dem_quay > 150) {
-        rs.dem_quay = 0;
-        printf("[Phase 2 → 3] Bắt đầu quét ZigZag!\n");
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
+        cout << "\n[Phase 2 → 3] Quay xong! Bat dau quet ZigZag!"
+             << "  Yaw=" << fixed << setprecision(2) << (yaw * 180.0 / M_PI)
+             << " deg\n";
         trang_thai = TIEN;
       }
       break;
@@ -639,28 +1085,21 @@ int main() {
     // Quay 90° sang hướng hàng kế tiếp
     case QUAY_1:
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      rs.dem_quay++;
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
-          rs.dem_quay > 100) {
-        rs.dem_quay = 0;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
         if (lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN) {
           // Bị chặn ngay khi quay xong → chuyển BFS
-          int oc, oh;
-          the_gioi_ra_luoi(rs.vi_tri_x + 0.15 * cos(yaw),
-                           rs.vi_tri_y + 0.15 * sin(yaw), oc, oh);
-          if ((unsigned)oc < (unsigned)LUOI_SO_COT &&
-              (unsigned)oh < (unsigned)LUOI_SO_HANG) {
-            ban_do[oh][oc].trang_thai = 2;
-          }
           rs.dich_bi_chan = true;
           rs.huong_tiep_tuc = rs.huong_hang;
-          rs.luu_cot = gc;
-          rs.luu_hang = gr;
+          rs.luu_cot = max(0, min(gc, LUOI_SO_COT - 1));
+          rs.luu_hang = max(0, min(gr, LUOI_SO_HANG - 1));
+          cout << "  [QUAY_1] Bi chan! → Chuyen BFS tu o (" << rs.luu_cot << ","
+               << rs.luu_hang << ")\n";
           trang_thai = KIEM_TRA_BAN_DO;
         } else {
           // Bình thường → dịch sang hàng mới
           rs.dich_bat_dau_x = rs.vi_tri_x;
           rs.dich_bat_dau_y = rs.vi_tri_y;
+          cout << "  [QUAY_1] OK! → Dich hang moi\n";
           trang_thai = DICH_HANG;
         }
       }
@@ -679,8 +1118,8 @@ int main() {
         // Chưa dịch được nửa đoạn mà đã bị chặn → BFS
         rs.dich_bi_chan = true;
         rs.huong_tiep_tuc = rs.huong_hang;
-        rs.luu_cot = gc;
-        rs.luu_hang = gr;
+        rs.luu_cot = max(0, min(gc, LUOI_SO_COT - 1));
+        rs.luu_hang = max(0, min(gr, LUOI_SO_HANG - 1));
         trang_thai = KIEM_TRA_BAN_DO;
       } else if (khoang_da_di >= KHOANG_DICH_HANG || bi_chan) {
         // Đủ khoảng dịch (hoặc bị chặn sau nửa đoạn) → quay về hàng
@@ -693,23 +1132,13 @@ int main() {
     // Quay 90° lần 2 để quay lại hướng chạy hàng
     case QUAY_2:
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      rs.dem_quay++;
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
-          rs.dem_quay > 100) {
-        rs.dem_quay = 0;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
         rs.huong_hang = rs.goc_muc_tieu;
         rs.chieu_queo *= -1; // đổi chiều queo để hình thành chữ S
         if (lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN) {
-          int oc, oh;
-          the_gioi_ra_luoi(rs.vi_tri_x + 0.15 * cos(yaw),
-                           rs.vi_tri_y + 0.15 * sin(yaw), oc, oh);
-          if ((unsigned)oc < (unsigned)LUOI_SO_COT &&
-              (unsigned)oh < (unsigned)LUOI_SO_HANG) {
-            ban_do[oh][oc].trang_thai = 2;
-          }
           rs.huong_tiep_tuc = rs.huong_hang;
-          rs.luu_cot = gc;
-          rs.luu_hang = gr;
+          rs.luu_cot = max(0, min(gc, LUOI_SO_COT - 1));
+          rs.luu_hang = max(0, min(gr, LUOI_SO_HANG - 1));
           trang_thai = KIEM_TRA_BAN_DO;
         } else {
           trang_thai = TIEN;
@@ -724,11 +1153,31 @@ int main() {
     // Chạy BFS tìm ô chưa thăm gần nhất
     case KIEM_TRA_BAN_DO:
       cv = co = 0;
-      rs.duong_di = tim_o_chua_tham(rs.luu_cot, rs.luu_hang);
+      // Nếu luu_cot/luu_hang ngoài biên → dùng vị trí robot hiện tại
+      {
+        int bfs_c = rs.luu_cot;
+        int bfs_h = rs.luu_hang;
+        if ((unsigned)bfs_c >= (unsigned)LUOI_SO_COT ||
+            (unsigned)bfs_h >= (unsigned)LUOI_SO_HANG) {
+          // Clamp về biên hợp lệ gần nhất
+          bfs_c = max(0, min(gc, LUOI_SO_COT - 1));
+          bfs_h = max(0, min(gr, LUOI_SO_HANG - 1));
+          printf(
+              "  [BFS] luu ngoai bien → fallback den vi tri hien tai (%d,%d)\n",
+              bfs_c, bfs_h);
+        }
+        rs.luu_cot = bfs_c;
+        rs.luu_hang = bfs_h;
+        rs.duong_di = tim_o_chua_tham(bfs_c, bfs_h);
+      }
       if (rs.duong_di.empty()) {
+        cout << "\n  [BFS] Khong con o chua tham! → HOAN THANH\n";
         trang_thai = HOAN_THANH;
       } else {
         rs.chi_so = 1;
+        cout << "  [BFS] Tim thay duong di! " << rs.duong_di.size()
+             << " buoc, dich = o(" << rs.duong_di.back().cot << ","
+             << rs.duong_di.back().hang << ")\n";
         trang_thai =
             (rs.chi_so >= rs.duong_di.size()) ? CAN_LAI_HUONG : DH_QUAY;
       }
@@ -741,12 +1190,8 @@ int main() {
                        tx, ty);
       double goc_den = atan2(ty - rs.vi_tri_y, tx - rs.vi_tri_x);
       co = KP_QUAY * chuan_hoa_goc(goc_den - yaw);
-      rs.dem_quay++;
-      if (abs(chuan_hoa_goc(goc_den - yaw)) < NGUONG_SAI_SO_GOC ||
-          rs.dem_quay > 100) {
-        rs.dem_quay = 0;
+      if (abs(chuan_hoa_goc(goc_den - yaw)) < NGUONG_SAI_SO_GOC)
         trang_thai = DH_TIEN;
-      }
     } break;
 
     // Tiến đến điểm BFS tiếp theo
@@ -759,13 +1204,6 @@ int main() {
       co = KP_GIU_THANG * chuan_hoa_goc(goc_den - yaw);
 
       if (va_cham || lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN) {
-        int oc, oh;
-        the_gioi_ra_luoi(rs.vi_tri_x + 0.15 * cos(yaw),
-                         rs.vi_tri_y + 0.15 * sin(yaw), oc, oh);
-        if ((unsigned)oc < (unsigned)LUOI_SO_COT &&
-            (unsigned)oh < (unsigned)LUOI_SO_HANG) {
-          ban_do[oh][oc].trang_thai = 2;
-        }
         trang_thai = DH_LUI;
         break;
       }
@@ -791,6 +1229,11 @@ int main() {
           int so_phai = dem_o_trong_theo_huong(
               gc, gr, chuan_hoa_goc(huong_tot_nhat - M_PI * 0.5));
           rs.chieu_queo = (so_trai >= so_phai) ? 1 : -1;
+          cout << "  [BFS] Da den dich! o(" << gc << "," << gr << ")"
+               << "  Huong tiep tuc=" << fixed << setprecision(1)
+               << (rs.huong_tiep_tuc * 180.0 / M_PI) << " deg"
+               << "  Chieu queo=" << (rs.chieu_queo > 0 ? "TRAI" : "PHAI")
+               << "\n";
           trang_thai = CAN_LAI_HUONG;
         } else {
           trang_thai = DH_QUAY; // tiếp tục đến điểm kế
@@ -802,8 +1245,8 @@ int main() {
     case DH_LUI:
       cv = V_LUI;
       if (!va_cham) {
-        rs.luu_cot = gc;
-        rs.luu_hang = gr;
+        rs.luu_cot = max(0, min(gc, LUOI_SO_COT - 1));
+        rs.luu_hang = max(0, min(gr, LUOI_SO_HANG - 1));
         trang_thai = KIEM_TRA_BAN_DO;
       }
       break;
@@ -813,10 +1256,7 @@ int main() {
       cv = 0;
       rs.goc_muc_tieu = rs.huong_tiep_tuc;
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
-      rs.dem_quay++;
-      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC ||
-          rs.dem_quay > 100) {
-        rs.dem_quay = 0;
+      if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
         rs.huong_hang = rs.huong_tiep_tuc;
         trang_thai = TIEN;
       }
@@ -829,7 +1269,41 @@ int main() {
       cv = co = 0;
       static bool da_in = false;
       if (!da_in) {
-        printf("✓ Hoàn thành! Toàn bộ diện tích đã được phủ.\n");
+        // Thống kê cuối cùng
+        int da_tham_f = 0, chua_tham_f = 0, vat_can_f = 0;
+        for (int i = 0; i < LUOI_SO_HANG; i++)
+          for (int j = 0; j < LUOI_SO_COT; j++) {
+            switch (ban_do[i][j].trang_thai) {
+            case 0:
+              chua_tham_f++;
+              break;
+            case 1:
+              da_tham_f++;
+              break;
+            case 2:
+              vat_can_f++;
+              break;
+            }
+          }
+        int tong_f = LUOI_SO_HANG * LUOI_SO_COT;
+        cout << "\n╔═══════════════════════════════════════════╗\n"
+             << "║         HOAN THANH - KET QUA QUET         ║\n"
+             << "╠═══════════════════════════════════════════╣\n"
+             << "║  Tong so buoc       : " << setw(8) << g_buoc
+             << "             ║\n"
+             << "║  Vi tri cuoi (X,Y)  : (" << fixed << setprecision(3)
+             << setw(7) << rs.vi_tri_x << ", " << setw(7) << rs.vi_tri_y
+             << ") m       ║\n"
+             << "║  O DA THAM  (#)     : " << setw(4) << da_tham_f << " / "
+             << setw(4) << tong_f << "             ║\n"
+             << "║  O CHUA THAM(.)     : " << setw(4) << chua_tham_f
+             << "                    ║\n"
+             << "║  VAT CAN    (X)     : " << setw(4) << vat_can_f
+             << "                    ║\n"
+             << "║  Do phu            : " << fixed << setprecision(1) << setw(5)
+             << (100.0 * da_tham_f / tong_f) << " %               ║\n"
+             << "╚═══════════════════════════════════════════╝\n";
+        // Dashboard lần cuối sẽ tự cập nhật qua ve_dashboard ở đầu vòng lặp
         da_in = true;
       }
       break;

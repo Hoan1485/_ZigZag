@@ -11,8 +11,8 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 WorldInfo {
 }
 Viewpoint {
-  orientation -0.5618573128235408 0.5675042815835308 0.6018764411497349 2.04914409928439
-  position 1.9954793124942414 -1.382592790476413 17.338565120320286
+  orientation -0.5775906821725647 0.5775906801323232 0.5768691446868274 2.095121838124636
+  position 2.3874850814835145e-05 -0.022118204781999586 20.090841218709702
 }
 TexturedBackground {
 }
@@ -28,7 +28,7 @@ DEF ZigZag_VaCham RectangleArena {
   wallHeight 0.2
 }
 Create {
-  translation -1.13737 -0.921002 0.0444107
+  translation -1.016 -0.751951 0.0444107
   rotation 0 0 1 3.13364999984478
   controller "vacuum_controller"
   bodySlot [
@@ -43,9 +43,11 @@ Create {
     }
     InertialUnit {
     }
+    GPS {
+    }
   ]
 }
 WoodenBox {
-  translation 1.09 0 0.3
-  size 0.8 1 0.6
+  translation 0.73 1.03 0.3
+  size 1 1 0.6
 }

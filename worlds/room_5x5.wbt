@@ -50,5 +50,7 @@ Create {
     }
     InertialUnit {
     }
+    GPS {
+    }
   ]
 }
