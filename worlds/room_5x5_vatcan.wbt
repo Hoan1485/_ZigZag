@@ -11,16 +11,16 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 WorldInfo {
 }
 Viewpoint {
-  orientation -0.5775906821725647 0.5775906801323232 0.5768691446868274 2.095121838124636
-  position 2.3874850814835145e-05 -0.022118204781999586 20.090841218709702
+  orientation -0.4313207543852217 0.44003562639220545 0.787610979064019 1.7878262644019738
+  position -0.3300219683609642 -13.496158994784313 20.799720644194277
 }
 TexturedBackground {
 }
 TexturedBackgroundLight {
 }
 DEF ZigZag_VaCham RectangleArena {
-  floorSize 5.1 5.1
-  floorTileSize 5.1 5.1
+  floorSize 5 5
+  floorTileSize 5 5
   floorAppearance Parquetry {
     type "light strip"
     IBLStrength 0
@@ -28,7 +28,7 @@ DEF ZigZag_VaCham RectangleArena {
   wallHeight 0.2
 }
 Create {
-  translation -1.016 -0.751951 0.0444107
+  translation 1.42705 -1.63149 0.0444107
   rotation 0 0 1 3.13364999984478
   controller "vacuum_controller"
   bodySlot [
@@ -48,6 +48,11 @@ Create {
   ]
 }
 WoodenBox {
-  translation 0.73 1.03 0.3
+  translation 1 1 0.3
+  size 1 1 0.6
+}
+WoodenBox {
+  translation -1.09 -0.79 0.3
+  name "wooden box(1)"
   size 1 1 0.6
 }
