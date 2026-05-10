@@ -11,8 +11,8 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 WorldInfo {
 }
 Viewpoint {
-  orientation -0.4415161676239911 0.43223319600375976 0.7862810807840918 1.829556364971234
-  position -0.24722070535084156 -7.386266052077349 12.754542514684532
+  orientation -0.5773502691896258 0.5773502691896258 0.5773502691896258 2.0944
+  position 0.3488675674897873 -0.07218258320817876 7.828163063235516
 }
 TexturedBackground {
 }
@@ -36,7 +36,7 @@ Create {
     Pen {
       inkColor 1 1 0
       inkDensity 1
-      leadSize 0.25
+      leadSize 0.26
     }
     RobotisLds01 {
       translation 0 0 0.05
@@ -49,11 +49,10 @@ Create {
   ]
 }
 WoodenBox {
-  translation 0.75 -1.3333 0.3
-  size 1.333 1.333 0.6
+  translation 0.8 -1.3333 0.3
+  size 1.25 1.25 0.6
 }
 WoodenBox {
-  translation -1.2367 1.0767 0.3
+  translation -1.2767 1.0767 0.3
   name "wooden box(1)"
-  size 0.666 0.666 0.6
 }
