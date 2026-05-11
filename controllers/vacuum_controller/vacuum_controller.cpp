@@ -8,6 +8,7 @@
 //    Phase 4 – Điều hướng BFS + phục hồi
 // ============================================================
 
+#include <webots/Display.hpp>
 #include <webots/GPS.hpp>
 #include <webots/InertialUnit.hpp>
 #include <webots/Lidar.hpp>
@@ -52,9 +53,10 @@ static constexpr double V_DIEU_HUONG = 0.30;   // [m/s]  di chuyển theo BFS
 // --- Ngưỡng không gian ---
 static constexpr double KHOANG_DICH_HANG =
     1.0 / 3.0;                               // [m]  độ rộng mỗi dải quét
-static constexpr double VUNG_AN_TOAN = 0.6;   // [m] vùng chạy max tốc
-static constexpr double VUNG_CANH_BAO = 0.3;  // [m] vùng bắt đầu rà phanh
-static constexpr double VUNG_NGUY_HIEM = 0.12;// [m] khoảng cách bắt buộc quay đầu
+static constexpr double VUNG_AN_TOAN = 0.6;  // [m] vùng chạy max tốc
+static constexpr double VUNG_CANH_BAO = 0.3; // [m] vùng bắt đầu rà phanh
+static constexpr double VUNG_NGUY_HIEM =
+    0.12; // [m] khoảng cách bắt buộc quay đầu
 static constexpr double NGUONG_VAT_CAN =
     0.12; // [m]  khoảng cách phát hiện vật cản
 static constexpr double DUNG_TUONG_1 = 0.20;   // [m]  dừng cách tường 1
@@ -508,14 +510,62 @@ static void dieu_khien_vi_sai(double v_tien, double v_goc, Motor *dc_trai,
 
 // Chuyển đổi tọa độ thế giới (x,y) sang tọa độ ô lưới (cột, hàng)
 static void the_gioi_ra_luoi(double x, double y, int &cot, int &hang) {
-  cot = (int)floor(x / O_LUOI_KICH_THUOC) + LUOI_DICH_COT;
-  hang = (int)floor(y / O_LUOI_KICH_THUOC) + LUOI_DICH_HANG;
+  // Cộng thêm nửa ô để tọa độ (0,0) rơi chính xác vào tâm của ô (LUOI_DICH_COT,
+  // LUOI_DICH_HANG)
+  cot = (int)floor((x + O_LUOI_KICH_THUOC * 0.5) / O_LUOI_KICH_THUOC) +
+        LUOI_DICH_COT;
+  hang = (int)floor((y + O_LUOI_KICH_THUOC * 0.5) / O_LUOI_KICH_THUOC) +
+         LUOI_DICH_HANG;
 }
 
-// Chuyển đổi tọa độ ô lưới → tọa độ tâm ô trong thế giới (m)
+// Chuyển đổi tọa độ ô lưới → tọa độ góc trên-trái của ô trong thế giới (m)
+// (dịch chuyển ngược lại một nửa ô để khớp với cách vẽ)
 static void luoi_ra_the_gioi(int cot, int hang, double &x, double &y) {
-  x = (cot - LUOI_DICH_COT) * O_LUOI_KICH_THUOC + (O_LUOI_KICH_THUOC * 0.5);
-  y = (hang - LUOI_DICH_HANG) * O_LUOI_KICH_THUOC + (O_LUOI_KICH_THUOC * 0.5);
+  x = (cot - LUOI_DICH_COT) * O_LUOI_KICH_THUOC - (O_LUOI_KICH_THUOC * 0.5);
+  y = (hang - LUOI_DICH_HANG) * O_LUOI_KICH_THUOC - (O_LUOI_KICH_THUOC * 0.5);
+}
+
+// Cập nhật Display để vẽ bản đồ
+static void ve_hien_thi_ban_do(Display *display) {
+  if (!display)
+    return;
+  int w = display->getWidth();
+  int h = display->getHeight();
+
+  // Bản đồ lưới logic là 15x15 ô, mỗi ô 1/3m => kích thước đúng 5x5m, tâm ở 0,0
+  double floor_x = 5.0;
+  double floor_y = 5.0;
+  double center_x = 0.0;
+  double center_y = 0.0;
+
+  double start_x = center_x - floor_x / 2.0;
+  double start_y = center_y - floor_y / 2.0;
+
+  double scale_x = w / floor_x;
+  double scale_y = h / floor_y;
+
+  // Xóa màn hình bằng nền trong suốt (không làm tối sàn nhà)
+  display->setAlpha(0.0);
+  display->setColor(0xFFFFFF); // Xóa sạch bộ đệm với alpha 0
+  display->fillRectangle(0, 0, w, h);
+  
+  // Trả lại alpha 1.0 và đổi sang màu đen để kẻ lưới y như hình mẫu
+  display->setAlpha(1.0);
+  display->setColor(0x000000); // Màu đen
+
+  // Vẽ khung lưới
+  for (int hang = 0; hang <= LUOI_SO_HANG; hang++) {
+    double cell_top =
+        (hang - LUOI_DICH_HANG) * O_LUOI_KICH_THUOC - (O_LUOI_KICH_THUOC * 0.5);
+    int py = (int)((cell_top - start_y) * scale_y);
+    display->drawLine(0, py, w, py);
+  }
+  for (int cot = 0; cot <= LUOI_SO_COT; cot++) {
+    double cell_left =
+        (cot - LUOI_DICH_COT) * O_LUOI_KICH_THUOC - (O_LUOI_KICH_THUOC * 0.5);
+    int px = (int)((cell_left - start_x) * scale_x);
+    display->drawLine(px, 0, px, h);
+  }
 }
 
 // Cập nhật bản đồ lưới từ dữ liệu LiDAR.
@@ -783,6 +833,8 @@ int main() {
   if (bumper_phai)
     bumper_phai->enable(buoc_ms);
 
+  Display *display = robot->getDisplay("display");
+
   // --- Khởi tạo FSM ---
   TrangThai trang_thai = QUET_360;
   TrangThaiRobot rs;
@@ -902,6 +954,9 @@ int main() {
 
     ve_dashboard((int)trang_thai, rs.vi_tri_x, rs.vi_tri_y, yaw, gc, gr,
                  va_cham, anh_lidar, ban_do);
+
+    // Cập nhật bản đồ lên màn hình Display trên sàn nhà
+    ve_hien_thi_ban_do(display);
 
     // ============================================================
     //  GIAĐOẠN KHỚI ĐỘNG: Robot đứng yên 2 giây để LiDAR quét 360°
@@ -1056,13 +1111,19 @@ int main() {
         // Vùng cảnh báo: giảm tốc mượt mà
         double toc_do_min = 0.05;
         cv = toc_do_min +
-             (V_ZIGZAG - toc_do_min) *
-                 ((kc_truoc - VUNG_NGUY_HIEM) / (VUNG_AN_TOAN - VUNG_NGUY_HIEM));
+             (V_ZIGZAG - toc_do_min) * ((kc_truoc - VUNG_NGUY_HIEM) /
+                                        (VUNG_AN_TOAN - VUNG_NGUY_HIEM));
       } else {
         cv = 0; // Vùng nguy hiểm: dừng khẩn cấp
       }
 
-      co = KP_GIU_THANG * chuan_hoa_goc(rs.huong_hang - yaw);
+      // Điều hướng PID: Bám theo đường tâm của các ô lưới
+      double center_x = (gc - LUOI_DICH_COT) * O_LUOI_KICH_THUOC;
+      double center_y = (gr - LUOI_DICH_HANG) * O_LUOI_KICH_THUOC;
+      double cte = (rs.vi_tri_x - center_x) * (-sin(rs.huong_hang)) + 
+                   (rs.vi_tri_y - center_y) * cos(rs.huong_hang);
+
+      co = KP_GIU_THANG * chuan_hoa_goc(rs.huong_hang - yaw) - 4.5 * cte;
 
       if (va_cham) {
         trang_thai = LUI;
@@ -1140,7 +1201,14 @@ int main() {
     // Dịch chuyển ngang KHOANG_DICH_HANG để sang hàng kế tiếp
     case DICH_HANG: {
       cv = V_DICH_HANG;
-      co = KP_GIU_THANG * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
+      
+      // Bám tâm lưới khi dịch chuyển ngang
+      double center_x = (gc - LUOI_DICH_COT) * O_LUOI_KICH_THUOC;
+      double center_y = (gr - LUOI_DICH_HANG) * O_LUOI_KICH_THUOC;
+      double cte = (rs.vi_tri_x - center_x) * (-sin(rs.goc_muc_tieu)) + 
+                   (rs.vi_tri_y - center_y) * cos(rs.goc_muc_tieu);
+                   
+      co = KP_GIU_THANG * chuan_hoa_goc(rs.goc_muc_tieu - yaw) - 4.5 * cte;
 
       double khoang_da_di = hypot(rs.vi_tri_x - rs.dich_bat_dau_x,
                                   rs.vi_tri_y - rs.dich_bat_dau_y);

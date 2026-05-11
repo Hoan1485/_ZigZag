@@ -1,4 +1,4 @@
-# Webots Robot Vacuum Navigation
+# Hệ thống cảm biến phân vùng - Webots Robot Vacuum Navigation
 
 Dự án này là mã nguồn mô phỏng thuật toán điều hướng thông minh cho robot hút bụi (dựa trên mô hình iRobot Create truyền động vi sai) trong môi trường 3D Webots. Hệ thống điều khiển được viết hoàn toàn bằng C++.
 
@@ -12,7 +12,7 @@ Dự án giải quyết bài toán cốt lõi của robot tự hành trong nhà:
    Kiến trúc điều khiển phức tạp chia thành 4 Pha chính (Bám tường, Chuẩn bị, Quét ZigZag, Phục hồi đường đi). Xử lý mượt mà mọi tình huống góc kẹt và các pha quay đầu chữ U.
    
 2. **Hệ Thống Chống Va Chạm Đa Cấp Bằng LiDAR (Multi-Level Collision Avoidance):**
-   Thay vì thuật toán "Xe đụng" (Bumper) ngớ ngẩn, robot có 3 vùng nhận thức không gian phía trước (An Toàn, Giảm Tốc, Bắt Buộc Rẽ). Robot sẽ lướt nhanh ở vùng thoáng và **rà phanh hãm tốc độ từ từ** khi lại gần vật cản, giúp tăng tuổi thọ động cơ và ngăn trượt bánh.
+   Thay vì thuật toán xe đụng (Bumper), robot có 3 vùng nhận thức không gian phía trước (An Toàn, Giảm Tốc, Nguy Hiểm). Robot sẽ lướt nhanh ở vùng thoáng và **rà phanh hãm tốc độ từ từ** khi lại gần vật cản.
    
 3. **Bản Đồ Lưới Chủ Động (Occupancy Grid Map):**
    Ghi nhớ 100% diện tích không gian xung quanh với lưới 15x15. Tích hợp bộ lọc nhiễu khoảng cách và khóa 1 chiều để các điểm mù của LiDAR không phá hỏng đường đi.
