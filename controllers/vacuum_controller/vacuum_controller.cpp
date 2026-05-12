@@ -1152,7 +1152,14 @@ int main() {
                       dem_o_trong_theo_huong(gc, gr, rs.huong_hang) == 0 &&
                       kc_truoc <= (float)NGUONG_VAT_CAN;
 
-      if (kc_truoc <= VUNG_NGUY_HIEM || het_hang) {
+      // Đảm bảo robot đi vào đủ sâu trong ô hiện tại (gần tâm ô) trước khi quay
+      // Tính khoảng cách từ vị trí hiện tại đến tâm ô dọc theo hướng di chuyển
+      double khoang_cach_den_tam =
+          (center_x - rs.vi_tri_x) * cos(rs.huong_hang) +
+          (center_y - rs.vi_tri_y) * sin(rs.huong_hang);
+      bool da_di_het_o = (khoang_cach_den_tam <= 0.05);
+
+      if ((kc_truoc <= VUNG_NGUY_HIEM || het_hang) && da_di_het_o) {
         if (kc_truoc <= VUNG_NGUY_HIEM) {
           // Ép kiểu trạng thái ô phía trước thành Vật Cản (2) ngay lập tức
           int dc = (int)round(cos(rs.huong_hang));
