@@ -61,8 +61,7 @@ static constexpr double NGUONG_VAT_CAN =
     0.12; // [m]  khoảng cách phát hiện vật cản
 static constexpr double DUNG_TUONG_1 = 0.20;   // [m]  dừng cách tường 1
 static constexpr double DUNG_TUONG_2 = 0.15;   // [m]  dừng cách tường 2
-static constexpr double NGUONG_DEN_NOI = 0.03;   // [m]  coi là đã đến điểm BFS
-static constexpr double KHOANG_LUI_AN_TOAN = 0.15; // [m]  phải lùi ít nhất 15cm trước khi xoay
+static constexpr double NGUONG_DEN_NOI = 0.03; // [m]  coi là đã đến điểm BFS
 
 // --- Tham số bộ điều khiển ---
 static constexpr double KP_GIU_THANG = 4.5; // Hệ số P giữ thẳng hướng
@@ -166,8 +165,6 @@ static const char *ten_trang_thai(int tt) {
   case 20:
     return "CAN_LAI_HUONG";
   case 21:
-    return "LUI_KHAN_CAP";
-  case 22:
     return "HOAN_THANH";
   default:
     return "UNKNOWN";
@@ -446,8 +443,6 @@ enum TrangThai {
   DH_LUI,
   CAN_LAI_HUONG,
 
-  LUI_KHAN_CAP, // Lùi khẩn cấp khi va chạm thứ cấp lúc đang quay
-
   HOAN_THANH
 };
 
@@ -484,11 +479,6 @@ struct TrangThaiRobot {
   size_t chi_so = 0;
   bool dang_phuc_hoi = false;
   int dem_cho_bfs = 0;
-
-  // Xử lý lùi an toàn
-  double vi_tri_lui_x = 0.0; // vị trí X khi bắt đầu lùi
-  double vi_tri_lui_y = 0.0; // vị trí Y khi bắt đầu lùi
-  TrangThai trang_thai_sau_lui = TIEN; // trạng thái sẽ chuyển đến sau khi lùi đủ
 };
 
 // ============================================================
@@ -930,14 +920,14 @@ int main() {
     the_gioi_ra_luoi(rs.vi_tri_x, rs.vi_tri_y, gc, gr);
 
     // Đánh dấu ô robot đứng là "đã thăm" (trạng thái 1).
-    // YÊU CẦU: Chỉ đánh dấu khi robot ở gần tâm ô lưới (khoảng cách < 0.1m).
+    // YÊU CẦU: Chỉ đánh dấu khi robot ở gần tâm ô lưới (khoảng cách < 0.2m).
     // Nếu ô đang là vật cản (2) – robot vẫn đi vào được → reset về 1
     // và giảm diem_tin để LiDAR không lập tức tái đánh dấu lại.
     if ((unsigned)gc < (unsigned)LUOI_SO_COT &&
         (unsigned)gr < (unsigned)LUOI_SO_HANG) {
       double cx, cy;
       luoi_ra_the_gioi(gc, gr, cx, cy);
-      if (hypot(rs.vi_tri_x - cx, rs.vi_tri_y - cy) < 0.1) {
+      if (hypot(rs.vi_tri_x - cx, rs.vi_tri_y - cy) < 0.2) {
         OLuoi &o_hien_tai = ban_do[gr][gc];
         if (o_hien_tai.trang_thai == 2)
           o_hien_tai.diem_tin =
@@ -1045,17 +1035,9 @@ int main() {
 
     // Lùi ra sau khi va chạm tường 1
     case LUI_1:
-      // Ghi nhớ điểm bắt đầu lùi ở bước đầu tiên
-      if (hypot(rs.vi_tri_x - rs.vi_tri_lui_x,
-                rs.vi_tri_y - rs.vi_tri_lui_y) < 0.001)
-        rs.vi_tri_lui_x = rs.vi_tri_x, rs.vi_tri_lui_y = rs.vi_tri_y;
       cv = V_LUI;
-      // Chỉ thoát khi đã lùi đủ khoảng an toàn VÀ bumper đã nhả
-      if (!va_cham && hypot(rs.vi_tri_x - rs.vi_tri_lui_x,
-                            rs.vi_tri_y - rs.vi_tri_lui_y) >= KHOANG_LUI_AN_TOAN) {
-        rs.vi_tri_lui_x = rs.vi_tri_lui_y = 0.0;
+      if (!va_cham)
         trang_thai = TIM_TUONG_2;
-      }
       break;
 
     // Xác định chiều quay để tìm tường thứ hai (vuông góc)
@@ -1088,15 +1070,9 @@ int main() {
 
     // Lùi ra sau khi va chạm tường 2
     case LUI_2:
-      if (hypot(rs.vi_tri_x - rs.vi_tri_lui_x,
-                rs.vi_tri_y - rs.vi_tri_lui_y) < 0.001)
-        rs.vi_tri_lui_x = rs.vi_tri_x, rs.vi_tri_lui_y = rs.vi_tri_y;
       cv = V_LUI;
-      if (!va_cham && hypot(rs.vi_tri_x - rs.vi_tri_lui_x,
-                            rs.vi_tri_y - rs.vi_tri_lui_y) >= KHOANG_LUI_AN_TOAN) {
-        rs.vi_tri_lui_x = rs.vi_tri_lui_y = 0.0;
+      if (!va_cham)
         trang_thai = CAN_CHINH_GOC;
-      }
       break;
 
     // Căn chỉnh góc robot về bội số 90° gần nhất
@@ -1200,18 +1176,9 @@ int main() {
 
     // Lùi ra sau khi va chạm ở phase zigzag
     case LUI:
-      // Ghi nhớ điểm bắt đầu lùi
-      if (hypot(rs.vi_tri_x - rs.vi_tri_lui_x,
-                rs.vi_tri_y - rs.vi_tri_lui_y) < 0.001)
-        rs.vi_tri_lui_x = rs.vi_tri_x, rs.vi_tri_lui_y = rs.vi_tri_y;
       cv = V_LUI;
-      // Không điều hướng khi lùi để tránh vật cản góc kẹp vào thân
-      co = 0;
-      // Thoát: bumper nhả + đã lùi đủ xa + LiDAR hai bên trống
-      if (!va_cham &&
-          hypot(rs.vi_tri_x - rs.vi_tri_lui_x,
-                rs.vi_tri_y - rs.vi_tri_lui_y) >= KHOANG_LUI_AN_TOAN) {
-        rs.vi_tri_lui_x = rs.vi_tri_lui_y = 0.0;
+      co = KP_GIU_THANG * chuan_hoa_goc(rs.huong_hang - yaw);
+      if (!va_cham) {
         rs.goc_muc_tieu =
             chuan_hoa_goc(rs.huong_hang + rs.chieu_queo * M_PI * 0.5);
         rs.dich_bi_chan = false;
@@ -1221,14 +1188,6 @@ int main() {
 
     // Quay 90° sang hướng hàng kế tiếp
     case QUAY_1:
-      // Va chạm thứ cấp khi đang quay → lùi khẩn cấp
-      if (va_cham) {
-        rs.vi_tri_lui_x = rs.vi_tri_x;
-        rs.vi_tri_lui_y = rs.vi_tri_y;
-        rs.trang_thai_sau_lui = QUAY_1; // quay lại tiếp tục quay sau khi lùi
-        trang_thai = LUI_KHAN_CAP;
-        break;
-      }
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
       if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
         if (lidar_tai(anh_lidar, 0) < (float)NGUONG_VAT_CAN) {
@@ -1285,14 +1244,6 @@ int main() {
 
     // Quay 90° lần 2 để quay lại hướng chạy hàng
     case QUAY_2:
-      // Va chạm thứ cấp khi đang quay → lùi khẩn cấp
-      if (va_cham) {
-        rs.vi_tri_lui_x = rs.vi_tri_x;
-        rs.vi_tri_lui_y = rs.vi_tri_y;
-        rs.trang_thai_sau_lui = QUAY_2; // quay lại tiếp tục quay sau khi lùi
-        trang_thai = LUI_KHAN_CAP;
-        break;
-      }
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
       if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
         rs.huong_hang = rs.goc_muc_tieu;
@@ -1432,35 +1383,12 @@ int main() {
 
     // Căn lại hướng zigzag rồi tiếp tục quét
     case CAN_LAI_HUONG:
-      // Va chạm thứ cấp khi đang xoay căn hướng → lùi khẩn cấp
-      if (va_cham) {
-        rs.vi_tri_lui_x = rs.vi_tri_x;
-        rs.vi_tri_lui_y = rs.vi_tri_y;
-        rs.trang_thai_sau_lui = CAN_LAI_HUONG;
-        trang_thai = LUI_KHAN_CAP;
-        break;
-      }
       cv = 0;
       rs.goc_muc_tieu = rs.huong_tiep_tuc;
       co = KP_QUAY * chuan_hoa_goc(rs.goc_muc_tieu - yaw);
       if (abs(chuan_hoa_goc(rs.goc_muc_tieu - yaw)) < NGUONG_SAI_SO_GOC) {
         rs.huong_hang = rs.huong_tiep_tuc;
         trang_thai = TIEN;
-      }
-      break;
-
-    // ------------------------------------------------------------
-    //  LÙI KHẨN CẤP: Va chạm thứ cấp trong khi đang xoay thân
-    // ------------------------------------------------------------
-    case LUI_KHAN_CAP:
-      cv = V_LUI;
-      co = 0; // không điều hướng khi lùi khẩn cấp
-      if (!va_cham &&
-          hypot(rs.vi_tri_x - rs.vi_tri_lui_x,
-                rs.vi_tri_y - rs.vi_tri_lui_y) >= KHOANG_LUI_AN_TOAN) {
-        rs.vi_tri_lui_x = rs.vi_tri_lui_y = 0.0;
-        // Trở lại trạng thái đã lưu (QUAY_1 / QUAY_2 / CAN_LAI_HUONG)
-        trang_thai = rs.trang_thai_sau_lui;
       }
       break;
 
