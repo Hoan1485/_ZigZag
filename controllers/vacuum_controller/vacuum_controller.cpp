@@ -58,7 +58,7 @@ static constexpr double VUNG_CANH_BAO = 0.3; // [m] vùng bắt đầu rà phanh
 static constexpr double VUNG_NGUY_HIEM =
     0.12; // [m] khoảng cách bắt buộc quay đầu
 static constexpr double NGUONG_VAT_CAN =
-    0.12; // [m]  khoảng cách phát hiện vật cản
+    0.06; // [m]  khoảng cách phát hiện vật cản
 static constexpr double DUNG_TUONG_1 = 0.20;   // [m]  dừng cách tường 1
 static constexpr double DUNG_TUONG_2 = 0.15;   // [m]  dừng cách tường 2
 static constexpr double NGUONG_DEN_NOI = 0.03; // [m]  coi là đã đến điểm BFS
@@ -920,14 +920,14 @@ int main() {
     the_gioi_ra_luoi(rs.vi_tri_x, rs.vi_tri_y, gc, gr);
 
     // Đánh dấu ô robot đứng là "đã thăm" (trạng thái 1).
-    // YÊU CẦU: Chỉ đánh dấu khi robot ở gần tâm ô lưới (khoảng cách < 0.2m).
+    // YÊU CẦU: Chỉ đánh dấu khi robot ở gần tâm ô lưới (khoảng cách < 0.1m).
     // Nếu ô đang là vật cản (2) – robot vẫn đi vào được → reset về 1
     // và giảm diem_tin để LiDAR không lập tức tái đánh dấu lại.
     if ((unsigned)gc < (unsigned)LUOI_SO_COT &&
         (unsigned)gr < (unsigned)LUOI_SO_HANG) {
       double cx, cy;
       luoi_ra_the_gioi(gc, gr, cx, cy);
-      if (hypot(rs.vi_tri_x - cx, rs.vi_tri_y - cy) < 0.2) {
+      if (hypot(rs.vi_tri_x - cx, rs.vi_tri_y - cy) < 0.1) {
         OLuoi &o_hien_tai = ban_do[gr][gc];
         if (o_hien_tai.trang_thai == 2)
           o_hien_tai.diem_tin =
@@ -1142,8 +1142,15 @@ int main() {
         break;
       }
 
+      // het_hang chỉ kích hoạt khi CÙNG LÚC:
+      //   1) Đang ở chế độ phục hồi BFS
+      //   2) Bản đồ lưới không còn ô 0 phía trước
+      //   3) LiDAR xác nhận vật cản thực sự gần (< NGUONG_VAT_CAN)
+      // → Tránh quay sớm khi đường trước còn thông, bỏ lỡ ô chưa quét cạnh vật
+      // cản
       bool het_hang = rs.dang_phuc_hoi &&
-                      dem_o_trong_theo_huong(gc, gr, rs.huong_hang) == 0;
+                      dem_o_trong_theo_huong(gc, gr, rs.huong_hang) == 0 &&
+                      kc_truoc <= (float)NGUONG_VAT_CAN;
 
       if (kc_truoc <= VUNG_NGUY_HIEM || het_hang) {
         if (kc_truoc <= VUNG_NGUY_HIEM) {
