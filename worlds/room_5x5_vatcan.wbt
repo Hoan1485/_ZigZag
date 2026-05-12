@@ -17,6 +17,7 @@ Viewpoint {
 TexturedBackground {
 }
 TexturedBackgroundLight {
+  castShadows FALSE
 }
 DEF ZigZag_VaCham RectangleArena {
   floorSize 5.1 5.1
