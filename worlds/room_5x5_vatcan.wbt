@@ -12,7 +12,7 @@ WorldInfo {
 }
 Viewpoint {
   orientation -0.5773502691896258 0.5773502691896258 0.5773502691896258 2.0944
-  position 0 0 9.258427269936723
+  position 1.2269936802165083e-16 9.815949441732067e-16 8.841421249614433
 }
 TexturedBackground {
 }
@@ -53,12 +53,16 @@ Create {
   ]
 }
 WoodenBox {
-  translation 0.503339 -1.16563 0.3
+  translation 1.18334 -1.16563 0.3
   size 1.25 1.25 0.6
 }
 WoodenBox {
-  translation -1.50336 1.16437 0.3
+  translation 0.49664 0.49437 0.3
   name "wooden box(1)"
+}
+WoodenBox {
+  translation -1.50336 1.16437 0.3
+  name "wooden box(2)"
 }
 DEF GRID_SURFACE Pose {
   translation 0 0 0.001
