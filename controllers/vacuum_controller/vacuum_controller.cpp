@@ -1064,41 +1064,14 @@ int main() {
           rs.huong_tiep_tuc = rs.huong_hang;
           rs.luu_cot = max(0, min(gc, LUOI_SO_COT - 1));
           rs.luu_hang = max(0, min(gr, LUOI_SO_HANG - 1));
-          cout << "  [QUAY_1] Bi chan vat ly! → BFS tu o (" << rs.luu_cot << ","
+          cout << "  [QUAY_1] Bi chan! -> BFS tu o (" << rs.luu_cot << ","
                << rs.luu_hang << ")\n";
           trang_thai = DUNG_CHO_BFS;
           rs.dem_cho_bfs = 0;
-        } else if (rs.dang_phuc_hoi) {
-          // BFS recovery: kiểm tra hàng kế có ô 0 không trước khi dich_hang
-          int dc_sh = (int)round(cos(rs.goc_muc_tieu));
-          int dh_sh = (int)round(sin(rs.goc_muc_tieu));
-          int nc_sh = max(0, min(gc + dc_sh, LUOI_SO_COT - 1));
-          int nh_sh = max(0, min(gr + dh_sh, LUOI_SO_HANG - 1));
-          int so_o = dem_o_trong_theo_huong(nc_sh, nh_sh, rs.huong_hang) +
-                     dem_o_trong_theo_huong(
-                         nc_sh, nh_sh, chuan_hoa_goc(rs.huong_hang + M_PI));
-          if (ban_do[nh_sh][nc_sh].trang_thai == 0)
-            so_o++;
-          if (so_o == 0) {
-            rs.dich_bi_chan = true;
-            rs.huong_tiep_tuc = rs.huong_hang;
-            rs.luu_cot = max(0, min(gc, LUOI_SO_COT - 1));
-            rs.luu_hang = max(0, min(gr, LUOI_SO_HANG - 1));
-            cout << "  [QUAY_1] Het cum 0! → BFS tu o (" << rs.luu_cot << ","
-                 << rs.luu_hang << ")\n";
-            trang_thai = DUNG_CHO_BFS;
-            rs.dem_cho_bfs = 0;
-          } else {
-            rs.dich_bat_dau_x = rs.vi_tri_x;
-            rs.dich_bat_dau_y = rs.vi_tri_y;
-            cout << "  [QUAY_1] Con " << so_o << " o 0 → Dich hang moi\n";
-            trang_thai = DICH_HANG;
-          }
         } else {
-          // Zigzag thường: dịch sang hàng mới bình thường
+          // Không bị chặn → dịch sang hàng mới (BFS sẽ xử lý nếu hết ô)
           rs.dich_bat_dau_x = rs.vi_tri_x;
           rs.dich_bat_dau_y = rs.vi_tri_y;
-          cout << "  [QUAY_1] OK! → Dich hang moi\n";
           trang_thai = DICH_HANG;
         }
       }
@@ -1182,12 +1155,8 @@ int main() {
     // Dừng lại 2 giây để LiDAR quét nét bản đồ trước khi BFS
     case DUNG_CHO_BFS:
       cv = co = 0;
-      if (rs.dem_cho_bfs < 2000 / buoc_ms) {
+      if (rs.dem_cho_bfs < 500 / buoc_ms) {
         rs.dem_cho_bfs++;
-        if (rs.dem_cho_bfs % (500 / buoc_ms) == 0) {
-          printf("  [BFS] Cho LiDAR cap nhat... con %d ms\n",
-                 2000 - rs.dem_cho_bfs * buoc_ms);
-        }
       } else {
         trang_thai = KIEM_TRA_BAN_DO;
       }
