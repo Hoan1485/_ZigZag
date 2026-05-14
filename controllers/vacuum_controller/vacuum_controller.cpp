@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <queue>
@@ -81,6 +82,7 @@ static constexpr int LUOI_DICH_HANG = 7;
 struct OLuoi {
   int8_t trang_thai = 0; // Trạng thái của ô
   int8_t diem_tin = 0;   // Điểm tích lũy của ô
+  int so_lan_tham = 0; // số lần robot đi qua ô (dùng cho heatmap)
 };
 
 // Bản đồ lưới toàn cục
@@ -416,11 +418,31 @@ struct TrangThaiRobot {
   size_t chi_so = 0;
   bool dang_phuc_hoi = false;
   int dem_cho_bfs = 0;
+  double tong_quang_duong = 0.0; // tổng quãng đường đã đi (m)
 };
 
 // ============================================================
 //  HÀM TIỆN ÍCH
 // ============================================================
+
+static void xuat_du_lieu_heatmap(double thoi_gian_tong, double quang_duong_tong) {
+  printf("\n==> TONG KET: Thoi gian: %.2f s | Quang duong: %.2f m\n",
+         thoi_gian_tong, quang_duong_tong);
+  std::ofstream file("heatmap_data.csv");
+  if (file.is_open()) {
+    for (int i = 0; i < LUOI_SO_HANG; i++) {
+      for (int j = 0; j < LUOI_SO_COT; j++) {
+        file << ban_do[i][j].so_lan_tham;
+        if (j < LUOI_SO_COT - 1) file << ",";
+      }
+      file << "\n";
+    }
+    file.close();
+    printf("Da luu du lieu Heatmap vao 'heatmap_data.csv'.\n");
+  } else {
+    printf("Loi: Khong the tao file heatmap_data.csv!\n");
+  }
+}
 
 // Chuẩn hóa góc về khoảng (-π, π].
 static inline double chuan_hoa_goc(double a) {
@@ -780,12 +802,14 @@ int main() {
 
     rs.enc_trai_cu = enc_L;
     rs.enc_phai_cu = enc_R;
+    rs.tong_quang_duong += abs(delta); // cộng dồn quãng đường
 
     int gc, gr;
     the_gioi_ra_luoi(rs.vi_tri_x, rs.vi_tri_y, gc, gr);
 
     if ((unsigned)gc < (unsigned)LUOI_SO_COT &&
         (unsigned)gr < (unsigned)LUOI_SO_HANG) {
+      ban_do[gr][gc].so_lan_tham++; // ghi nhận lượt đi qua cho heatmap
       double cx, cy;
       luoi_ra_the_gioi(gc, gr, cx, cy);
       if (hypot(rs.vi_tri_x - cx, rs.vi_tri_y - cy) < 0.05) {
@@ -1283,20 +1307,13 @@ int main() {
       cv = co = 0;
       static bool da_in = false;
       if (!da_in) {
-        // Thống kê cuối cùng
         int da_tham_f = 0, chua_tham_f = 0, vat_can_f = 0;
         for (int i = 0; i < LUOI_SO_HANG; i++)
           for (int j = 0; j < LUOI_SO_COT; j++) {
             switch (ban_do[i][j].trang_thai) {
-            case 0:
-              chua_tham_f++;
-              break;
-            case 1:
-              da_tham_f++;
-              break;
-            case 2:
-              vat_can_f++;
-              break;
+            case 0: chua_tham_f++; break;
+            case 1: da_tham_f++;   break;
+            case 2: vat_can_f++;   break;
             }
           }
         int tong_f = LUOI_SO_HANG * LUOI_SO_COT;
@@ -1305,9 +1322,11 @@ int main() {
              << "╠═══════════════════════════════════════════╣\n"
              << "║  Tong so buoc       : " << setw(8) << g_buoc
              << "             ║\n"
-             << "║  Vị trí  cuoi (X,Y)  : (" << fixed << setprecision(3)
+             << "║  Vi tri cuoi (X,Y)  : (" << fixed << setprecision(3)
              << setw(7) << rs.vi_tri_x << ", " << setw(7) << rs.vi_tri_y
              << ") m       ║\n"
+             << "║  Quang duong        : " << fixed << setprecision(2)
+             << setw(8) << rs.tong_quang_duong << " m           ║\n"
              << "║  O DA THAM  (#)     : " << setw(4) << da_tham_f << " / "
              << setw(4) << tong_f << "             ║\n"
              << "║  O CHUA THAM(.)     : " << setw(4) << chua_tham_f
@@ -1317,7 +1336,7 @@ int main() {
              << "║  Do phu            : " << fixed << setprecision(1) << setw(5)
              << (100.0 * da_tham_f / tong_f) << " %               ║\n"
              << "╚═══════════════════════════════════════════╝\n";
-        // Dashboard lần cuối sẽ tự cập nhật qua ve_dashboard ở đầu vòng lặp
+        xuat_du_lieu_heatmap(robot->getTime(), rs.tong_quang_duong);
         da_in = true;
       }
       break;
