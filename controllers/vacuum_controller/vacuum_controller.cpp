@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <queue>
@@ -69,6 +70,7 @@ static constexpr double KP_QUAY = 5.5;      // 20 Hệ số P điều khiển g�
 static constexpr double NGUONG_SAI_SO_GOC =
     0.012; // [rad]  sai số góc chấp nhận được
 // --- Hệ số chuyển đổi ---
+static constexpr double EPS_CENTER = 0.05; // [m] epsilon for center crossing
 static constexpr double DO_SANG_RAD = M_PI / 180.0;
 
 static constexpr double O_LUOI_KICH_THUOC = 1.0 / 3.0;
@@ -79,8 +81,9 @@ static constexpr int LUOI_DICH_HANG = 7;
 
 // Một ô trong lưới bản đồ
 struct OLuoi {
-  int8_t trang_thai = 0; // 0 = chưa thăm, 1 = đã thăm, 2 = vật cản
-  int8_t diem_tin = 0;   // điểm tích lũy để xác nhận vật cản
+  int8_t trang_thai = 0;    // 0 = chưa thăm, 1 = đã thăm, 2 = vật cản
+  int8_t diem_tin = 0;      // điểm tích lũy để xác nhận vật cản
+  uint16_t so_lan_tham = 0; // số lần robot đi qua
 };
 
 // Bản đồ lưới toàn cục
@@ -454,7 +457,11 @@ struct TrangThaiRobot {
   double enc_trai_cu = 0.0;
   double enc_phai_cu = 0.0;
   double goc_truoc = 0.0;
-  bool buoc_dau = true; // true = chưa đọc encoder lần đầu
+  bool buoc_dau = true;          // true = chưa đọc encoder lần đầu
+  double quang_duong_tong = 0.0; // Tổng quãng đường đi được
+
+  int luu_gc_hien_tai = -1;
+  int luu_gr_hien_tai = -1;
 
   // Góc điều hướng
   double goc_muc_tieu = 0.0;   // góc đích hiện tại khi quay
@@ -770,6 +777,31 @@ static int dem_o_trong_theo_huong(int cot, int hang, double huong) {
 }
 
 // ============================================================
+//  Xuất kết quả tổng kết & ghi heatmap ra CSV
+// ============================================================
+void xuat_du_lieu_heatmap(double thoi_gian_tong, double quang_duong_tong) {
+  printf("==> TỔNG KẾT: Thời gian: %.2f s | Quãng đường: %.2f m\n",
+         thoi_gian_tong, quang_duong_tong);
+  std::ofstream file("heatmap_data.csv");
+  if (file.is_open()) {
+    // In từ hàng cao nhất xuống hàng thấp nhất để định dạng file CSV 
+    // khớp với trục tọa độ hiển thị trên Dashboard (Y hướng lên)
+    for (int i = LUOI_SO_HANG - 1; i >= 0; i--) {
+      for (int j = 0; j < LUOI_SO_COT; j++) {
+        file << ban_do[i][j].so_lan_tham;
+        if (j < LUOI_SO_COT - 1)
+          file << ",";
+      }
+      file << "\n";
+    }
+    file.close();
+    printf("Đã lưu dữ liệu Heatmap vào 'heatmap_data.csv'.\n");
+  } else {
+    printf("Lỗi: Không thể tạo file heatmap_data.csv!\n");
+  }
+}
+
+// ============================================================
 //  HÀM MAIN
 // ============================================================
 int main() {
@@ -902,6 +934,7 @@ int main() {
     const double enc_R = enc_phai->getValue();
     const double delta = ((enc_L - rs.enc_trai_cu) + (enc_R - rs.enc_phai_cu)) *
                          0.5 * BANH_XE_BAN_KINH;
+    rs.quang_duong_tong += abs(delta);
 
     if (gps && gps->getValues() && !isnan(gps->getValues()[0])) {
       const double *vi_tri_gps = gps->getValues();
@@ -932,6 +965,13 @@ int main() {
         if (o_hien_tai.trang_thai == 2)
           o_hien_tai.diem_tin =
               (o_hien_tai.diem_tin > 0) ? o_hien_tai.diem_tin - 200 : 0;
+
+        if (rs.luu_gc_hien_tai != gc || rs.luu_gr_hien_tai != gr) {
+          o_hien_tai.so_lan_tham++;
+          rs.luu_gc_hien_tai = gc;
+          rs.luu_gr_hien_tai = gr;
+        }
+
         o_hien_tai.trang_thai = 1; // luôn ghi đè thành "đã thăm"
       }
     }
@@ -1142,24 +1182,20 @@ int main() {
         break;
       }
 
-      // het_hang chỉ kích hoạt khi CÙNG LÚC:
-      //   1) Đang ở chế độ phục hồi BFS
-      //   2) Bản đồ lưới không còn ô 0 phía trước
-      //   3) LiDAR xác nhận vật cản thực sự gần (< NGUONG_VAT_CAN)
-      // → Tránh quay sớm khi đường trước còn thông, bỏ lỡ ô chưa quét cạnh vật
-      // cản
-      bool het_hang = rs.dang_phuc_hoi &&
-                      dem_o_trong_theo_huong(gc, gr, rs.huong_hang) == 0 &&
-                      kc_truoc <= (float)NGUONG_VAT_CAN;
+      // het_hang: hết ô chưa thăm phía trước theo bản đồ lưới,
+      // bất kể đang phục hồi BFS hay zigzag bình thường.
+      // Ưu tiên bản đồ lưới làm chuẩn — không phụ thuộc dang_phuc_hoi.
+      bool het_hang = (dem_o_trong_theo_huong(gc, gr, rs.huong_hang) == 0);
 
-      // Đảm bảo robot đi vào đủ sâu trong ô hiện tại (gần tâm ô) trước khi quay
-      // Tính khoảng cách từ vị trí hiện tại đến tâm ô dọc theo hướng di chuyển
+      // Đảm bảo robot đã đi qua tâm của ô HIỆN TẠI
+      // trước khi kích hoạt điều kiện quay/dừng.
+      double curr_cx, curr_cy;
+      luoi_ra_the_gioi(gc, gr, curr_cx, curr_cy);
       double khoang_cach_den_tam =
-          (center_x - rs.vi_tri_x) * cos(rs.huong_hang) +
-          (center_y - rs.vi_tri_y) * sin(rs.huong_hang);
-      bool da_di_het_o = (khoang_cach_den_tam <= 0.05);
-
-      if ((kc_truoc <= VUNG_NGUY_HIEM || het_hang) && da_di_het_o) {
+          (curr_cx - rs.vi_tri_x) * cos(rs.huong_hang) +
+          (curr_cy - rs.vi_tri_y) * sin(rs.huong_hang);
+      bool passed_center = (khoang_cach_den_tam <= 0.0);
+      if ((kc_truoc <= VUNG_NGUY_HIEM || het_hang) && passed_center) {
         if (kc_truoc <= VUNG_NGUY_HIEM) {
           // Ép kiểu trạng thái ô phía trước thành Vật Cản (2) ngay lập tức
           int dc = (int)round(cos(rs.huong_hang));
@@ -1180,10 +1216,35 @@ int main() {
         if (xong_het) {
           trang_thai = HOAN_THANH;
         } else {
-          rs.goc_muc_tieu =
+          double goc_dich =
               chuan_hoa_goc(rs.huong_hang + rs.chieu_queo * M_PI * 0.5);
-          rs.dich_bi_chan = false;
-          trang_thai = QUAY_1;
+          int dc_dich = (int)round(cos(goc_dich));
+          int dh_dich = (int)round(sin(goc_dich));
+          int nc_dich = gc + dc_dich;
+          int nh_dich = gr + dh_dich;
+
+          bool o_ke_tiep_trong = false;
+          if (nc_dich >= 0 && nc_dich < LUOI_SO_COT && nh_dich >= 0 &&
+              nh_dich < LUOI_SO_HANG) {
+            if (ban_do[nh_dich][nc_dich].trang_thai == 0) {
+              o_ke_tiep_trong = true;
+            }
+          }
+
+          if (o_ke_tiep_trong) {
+            rs.goc_muc_tieu = goc_dich;
+            rs.dich_bi_chan = false;
+            trang_thai = QUAY_1;
+          } else {
+            rs.dich_bi_chan = true;
+            rs.huong_tiep_tuc = rs.huong_hang;
+            rs.luu_cot = max(0, min(gc, LUOI_SO_COT - 1));
+            rs.luu_hang = max(0, min(gr, LUOI_SO_HANG - 1));
+            trang_thai = DUNG_CHO_BFS;
+            rs.dem_cho_bfs = 0;
+            cout << "  [TIEN] Het hang va o ben canh khong phai o trong! -> "
+                    "Chuyen BFS\n";
+          }
         }
       }
     } break;
@@ -1447,6 +1508,45 @@ int main() {
              << "║  Do phu            : " << fixed << setprecision(1) << setw(5)
              << (100.0 * da_tham_f / tong_f) << " %               ║\n"
              << "╚═══════════════════════════════════════════╝\n";
+
+        // In bản đồ nhiệt ra file hoặc màn hình
+        cout << "\n[BAN DO NHIET - SO LAN THAM QUY DAO]\n";
+        int tong_lan_tham = 0;
+        int max_lan_tham = 0;
+        int o_da_tham_thuc_te = 0;
+        for (int i = 0; i < LUOI_SO_HANG; i++) {
+          for (int j = 0; j < LUOI_SO_COT; j++) {
+            int sl = ban_do[i][j].so_lan_tham;
+            if (sl > 0) {
+              tong_lan_tham += sl;
+              o_da_tham_thuc_te++;
+              if (sl > max_lan_tham)
+                max_lan_tham = sl;
+            }
+            if (ban_do[i][j].trang_thai == 2) {
+              cout << " XX ";
+            } else if (sl == 0) {
+              cout << " .. ";
+            } else {
+              cout << setw(3) << sl << " ";
+            }
+          }
+          cout << "\n";
+        }
+
+        if (o_da_tham_thuc_te > 0) {
+          cout << "\nThong ke trung lap quy dao:\n";
+          cout << "- So lan tham trung binh tren o da don: " << fixed
+               << setprecision(2) << ((double)tong_lan_tham / o_da_tham_thuc_te)
+               << " lan/o\n";
+          cout << "- So lan tham nhieu nhat 1 o: " << max_lan_tham << " lan\n";
+          cout << "- He so trung lap: " << fixed << setprecision(2)
+               << (((double)tong_lan_tham / o_da_tham_thuc_te) - 1.0) * 100.0
+               << " %\n\n";
+        }
+
+        xuat_du_lieu_heatmap((g_buoc * buoc_ms) / 1000.0, rs.quang_duong_tong);
+
         // Dashboard lần cuối sẽ tự cập nhật qua ve_dashboard ở đầu vòng lặp
         da_in = true;
       }
