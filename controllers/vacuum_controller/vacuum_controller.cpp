@@ -82,7 +82,7 @@ static constexpr int LUOI_DICH_HANG = 7;
 struct OLuoi {
   int8_t trang_thai = 0; // Trạng thái của ô
   int8_t diem_tin = 0;   // Điểm tích lũy của ô
-  int so_lan_tham = 0; // số lần robot đi qua ô (dùng cho heatmap)
+  int so_lan_tham = 0;   // số lần robot đi qua ô (dùng cho heatmap)
 };
 
 // Bản đồ lưới toàn cục
@@ -108,7 +108,7 @@ static constexpr int DASHBOARD_DONG_TRANG_THAI = 7;
 static constexpr int DASHBOARD_TONG_DONG =
     DASHBOARD_DONG_TRANG_THAI + LUOI_SO_HANG + 3;
 
-static int g_buoc = 0;
+static double g_thoi_gian_s = 0.0; // tổng thời gian hoạt động (giây)
 static int g_so_va_cham = 0;
 static bool g_bumper_cu = false;
 static bool g_dashboard_da_ve = false;
@@ -186,9 +186,17 @@ static void ve_dashboard(int trang_thai_fsm, double x, double y, double yaw,
   di_chuyen_len_dau_dashboard();
 
   {
+    int tong_s = (int)g_thoi_gian_s;
+    int gio   = tong_s / 3600;
+    int phut  = (tong_s % 3600) / 60;
+    int giay  = tong_s % 60;
     ostringstream s;
-    s << ANSI_BOLD << ANSI_RED << "══ ROBOT HUT BUI │ Buoc:" << setw(6)
-      << g_buoc << " ══" << ANSI_RESET;
+    s << ANSI_BOLD << ANSI_RED
+      << "══ ROBOT HUT BUI │ Thoi gian: "
+      << setfill('0') << setw(2) << gio << ":"
+      << setw(2) << phut << ":"
+      << setw(2) << giay
+      << " ══" << ANSI_RESET;
     dong_dashboard(s.str());
   }
 
@@ -228,7 +236,8 @@ static void ve_dashboard(int trang_thai_fsm, double x, double y, double yaw,
   {
     string vung_str = ANSI_WHITE + string("Không rõ");
     if (anh_lidar) {
-      float kc_truoc = lidar_tai(anh_lidar, 0);
+      // Trung bình khoảng cách trong góc 45° trước mặt (−22° ÷ +22°)
+      float kc_truoc = lidar_trung_binh(anh_lidar, -22, 22);
       if (kc_truoc > VUNG_AN_TOAN)
         vung_str = ANSI_GREEN + string("An toàn");
       else if (kc_truoc > VUNG_CANH_BAO)
@@ -425,7 +434,8 @@ struct TrangThaiRobot {
 //  HÀM TIỆN ÍCH
 // ============================================================
 
-static void xuat_du_lieu_heatmap(double thoi_gian_tong, double quang_duong_tong) {
+static void xuat_du_lieu_heatmap(double thoi_gian_tong,
+                                 double quang_duong_tong) {
   printf("\n==> TONG KET: Thoi gian: %.2f s | Quang duong: %.2f m\n",
          thoi_gian_tong, quang_duong_tong);
   std::ofstream file("heatmap_data.csv");
@@ -433,7 +443,8 @@ static void xuat_du_lieu_heatmap(double thoi_gian_tong, double quang_duong_tong)
     for (int i = 0; i < LUOI_SO_HANG; i++) {
       for (int j = 0; j < LUOI_SO_COT; j++) {
         file << ban_do[i][j].so_lan_tham;
-        if (j < LUOI_SO_COT - 1) file << ",";
+        if (j < LUOI_SO_COT - 1)
+          file << ",";
       }
       file << "\n";
     }
@@ -809,7 +820,12 @@ int main() {
 
     if ((unsigned)gc < (unsigned)LUOI_SO_COT &&
         (unsigned)gr < (unsigned)LUOI_SO_HANG) {
-      ban_do[gr][gc].so_lan_tham++; // ghi nhận lượt đi qua cho heatmap
+      static int last_gc = -1, last_gr = -1;
+      if (gc != last_gc || gr != last_gr) {
+        ban_do[gr][gc].so_lan_tham++; // ghi nhận lượt đi qua cho heatmap
+        last_gc = gc;
+        last_gr = gr;
+      }
       double cx, cy;
       luoi_ra_the_gioi(gc, gr, cx, cy);
       if (hypot(rs.vi_tri_x - cx, rs.vi_tri_y - cy) < 0.05) {
@@ -833,8 +849,13 @@ int main() {
     }
     cap_nhat_ban_do(anh_lidar, rs.vi_tri_x, rs.vi_tri_y, yaw, van_toc_goc);
 
-    if (g_buoc % 50 == 0)
+    // Chạy lap_day_vung_kin mỗi ~0.5 giây
+    static double g_thoi_gian_lap_day = 0.0;
+    g_thoi_gian_lap_day += dt;
+    if (g_thoi_gian_lap_day >= 0.5) {
+      g_thoi_gian_lap_day = 0.0;
       lap_day_vung_kin();
+    }
 
     const bool va_cham = (bumper_trai && bumper_trai->getValue() > 0.5) ||
                          (bumper_phai && bumper_phai->getValue() > 0.5);
@@ -842,7 +863,7 @@ int main() {
       g_so_va_cham++;
     g_bumper_cu = va_cham;
 
-    g_buoc++;
+    g_thoi_gian_s += dt; // cộng dồn thời gian hoạt động
     ve_dashboard((int)trang_thai, rs.vi_tri_x, rs.vi_tri_y, yaw, gc, gr,
                  anh_lidar, ban_do);
     ve_hien_thi_ban_do(display);
@@ -1311,31 +1332,46 @@ int main() {
         for (int i = 0; i < LUOI_SO_HANG; i++)
           for (int j = 0; j < LUOI_SO_COT; j++) {
             switch (ban_do[i][j].trang_thai) {
-            case 0: chua_tham_f++; break;
-            case 1: da_tham_f++;   break;
-            case 2: vat_can_f++;   break;
+            case 0:
+              chua_tham_f++;
+              break;
+            case 1:
+              da_tham_f++;
+              break;
+            case 2:
+              vat_can_f++;
+              break;
             }
           }
         int tong_f = LUOI_SO_HANG * LUOI_SO_COT;
-        cout << "\n╔═══════════════════════════════════════════╗\n"
-             << "║         HOAN THANH - KET QUA QUET         ║\n"
-             << "╠═══════════════════════════════════════════╣\n"
-             << "║  Tong so buoc       : " << setw(8) << g_buoc
-             << "             ║\n"
-             << "║  Vi tri cuoi (X,Y)  : (" << fixed << setprecision(3)
-             << setw(7) << rs.vi_tri_x << ", " << setw(7) << rs.vi_tri_y
-             << ") m       ║\n"
-             << "║  Quang duong        : " << fixed << setprecision(2)
-             << setw(8) << rs.tong_quang_duong << " m           ║\n"
-             << "║  O DA THAM  (#)     : " << setw(4) << da_tham_f << " / "
-             << setw(4) << tong_f << "             ║\n"
-             << "║  O CHUA THAM(.)     : " << setw(4) << chua_tham_f
-             << "                    ║\n"
-             << "║  VAT CAN    (X)     : " << setw(4) << vat_can_f
-             << "                    ║\n"
-             << "║  Do phu            : " << fixed << setprecision(1) << setw(5)
-             << (100.0 * da_tham_f / tong_f) << " %               ║\n"
-             << "╚═══════════════════════════════════════════╝\n";
+        {
+          int tong_s = (int)g_thoi_gian_s;
+          int gio  = tong_s / 3600;
+          int phut = (tong_s % 3600) / 60;
+          int giay = tong_s % 60;
+          cout << "\n╔═══════════════════════════════════════════╗\n"
+               << "║         HOAN THANH - KET QUA QUET         ║\n"
+               << "╠═══════════════════════════════════════════╣\n"
+               << "║  Thoi gian hd       :   "
+               << setfill('0') << setw(2) << gio << ":"
+               << setw(2) << phut << ":"
+               << setw(2) << giay << setfill(' ')
+               << "          ║\n"
+               << "║  Vi tri cuoi (X,Y)  : (" << fixed << setprecision(3)
+               << setw(7) << rs.vi_tri_x << ", " << setw(7) << rs.vi_tri_y
+               << ") m       ║\n"
+               << "║  Quang duong        : " << fixed << setprecision(2)
+               << setw(8) << rs.tong_quang_duong << " m           ║\n"
+               << "║  O DA THAM  (#)     : " << setw(4) << da_tham_f << " / "
+               << setw(4) << tong_f << "             ║\n"
+               << "║  O CHUA THAM(.)     : " << setw(4) << chua_tham_f
+               << "                    ║\n"
+               << "║  VAT CAN    (X)     : " << setw(4) << vat_can_f
+               << "                    ║\n"
+               << "║  Do phu            : " << fixed << setprecision(1) << setw(5)
+               << (100.0 * da_tham_f / tong_f) << " %               ║\n"
+               << "╚═══════════════════════════════════════════╝\n";
+        }
         xuat_du_lieu_heatmap(robot->getTime(), rs.tong_quang_duong);
         da_in = true;
       }
