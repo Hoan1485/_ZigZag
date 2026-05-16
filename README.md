@@ -2,13 +2,13 @@
 
 Dự án này là mã nguồn mô phỏng thuật toán điều hướng thông minh cho robot hút bụi (dựa trên mô hình iRobot Create truyền động vi sai) trong môi trường 3D Webots. Hệ thống điều khiển được viết hoàn toàn bằng C++.
 
-Dự án giải quyết bài toán cốt lõi của robot tự hành trong nhà: Tối đa hóa khả năng bao phủ diện tích sàn (Coverage) và Tối ưu hóa việc di chuyển, tránh né vật cản khôn khéo (Obstacle Avoidance).
+Dự án giải quyết bài toán cốt lõi của robot tự hành trong nhà: Tối đa hóa khả năng bao phủ diện tích sàn (Coverage) và Tối ưu hóa việc di chuyển, tránh né vật cản thông minh (Obstacle Avoidance).
 
 ---
 
 ## ✨ Tính Năng Nổi Bật
 
-1. **Hệ Thống FSM 22 Trạng Thái (Finite State Machine):**
+1. **Hệ Thống FSM 22 Trạng Thái (Finite State Machine - Máy trạng thái):**
    Kiến trúc điều khiển phức tạp chia thành 4 Pha chính (Bám tường, Chuẩn bị, Quét ZigZag, Phục hồi đường đi). Xử lý mượt mà mọi tình huống góc kẹt và các pha quay đầu chữ U.
    
 2. **Hệ Thống Chống Va Chạm Đa Cấp Bằng LiDAR (Multi-Level Collision Avoidance):**
@@ -68,5 +68,5 @@ Dự án được viết rõ ràng để tạo tiền đề cho các đồ án c
 - ⚡ Nâng cấp BFS thành A* hoặc D* Lite cho quãng đường dài hơn.
 
 ## 📄 Tác Giả
-Được nghiên cứu và phát triển bởi: **Nguyễn Văn Hoàn**.
+Được nghiên cứu và phát triển bởi: **Nguyễn Văn Hoàn**, **Lê Anh Quân**.
 Dự án phục vụ cho mục đích học thuật và nghiên cứu thuật toán tự hành.
